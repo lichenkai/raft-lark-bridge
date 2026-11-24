@@ -1,0 +1,12 @@
+{
+  "name": "raft-lark-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Lark CLI user-identity bridge for Raft agents",
+  "type": "module",
+  "bin": { "raft-lark-bridge": "./src/cli.js" },
+  "files": ["src", "README.md", "README.zh-CN.md"],
+  "engines": { "node": ">=22.13.0" },
+  "scripts": { "test": "node --test", "start": "node src/cli.js run" },
+  "dependencies": { "@botiverse/raft-sdk": "0.40.0" }
+}
