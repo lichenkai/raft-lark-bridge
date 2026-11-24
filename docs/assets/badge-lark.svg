@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 122 24" width="122" height="24" role="img" aria-label="lark-cli 1.0.100">
+  <title>lark-cli 1.0.100</title>
+  <defs><clipPath id="shape"><rect width="122" height="24" rx="5"/></clipPath></defs>
+  <g clip-path="url(#shape)">
+    <path fill="#263454" d="M0 0h57v24H0z"/>
+    <path fill="#2c56bb" d="M57 0h65v24H57z"/>
+    <path fill="#fff" opacity=".12" d="M0 0h122v1H0z"/>
+  </g>
+  <g fill="#fff" font-family="Verdana, Arial, sans-serif" font-size="11" text-anchor="middle">
+    <text x="28.5" y="15.8">lark-cli</text>
+    <text x="89.5" y="15.8">1.0.100</text>
+  </g>
+</svg>

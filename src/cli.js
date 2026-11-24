@@ -43,6 +43,15 @@ function indexOfAnswer(answer, count) {
   return /^\d+$/.test(answer) && Number(answer) >= 1 && Number(answer) <= count ? Number(answer) - 1 : -1;
 }
 
+async function selectOption(ask, prompt, options, { fallback, named = false } = {}) {
+  for (;;) {
+    const answer = (await ask(prompt)) || fallback;
+    const selected = options[indexOfAnswer(answer, options.length)] ?? (named && options.find((row) => row.name === answer));
+    if (selected) return selected;
+    console.log('请选择列表中的有效选项。按 Ctrl+C 可退出配置。');
+  }
+}
+
 function showPreview(samples) {
   if (!samples.length) return console.log('预览窗口内没有命中的文本消息。');
   for (const sample of samples) console.log(`  ${new Date(sample.sentAt).toLocaleString()}  ${clean(sample.content).slice(0, 120)}`);
@@ -82,11 +91,13 @@ async function chooseChat(lark, profile, user, mode, ask) {
     if (query) options = await lark.groups(profile, query);
   }
   if (options.length) listOptions(options.map((chat) => `${chat.name} · ${chat.id}`));
-  const choice = await ask(options.length ? '选择编号，或输入 oc_ 会话 ID：' : '输入 oc_ 会话 ID：');
-  if (CHAT_ID.test(choice)) return { id: choice, name: choice };
-  const index = indexOfAnswer(choice, options.length);
-  if (index < 0) throw new Error('会话无效。请从列表选择，或使用会话的 oc_ ID。');
-  return options[index];
+  for (;;) {
+    const choice = await ask(options.length ? '选择编号，或输入 oc_ 会话 ID：' : '输入 oc_ 会话 ID：');
+    if (CHAT_ID.test(choice)) return { id: choice, name: choice };
+    const index = indexOfAnswer(choice, options.length);
+    if (index >= 0) return options[index];
+    console.log('请选择列表中的会话，或输入以 oc_ 开头的会话 ID。');
+  }
 }
 
 async function setup(files) {
@@ -97,22 +108,25 @@ async function setup(files) {
   const { ask } = questions;
   let token;
   try {
+    console.log('\nRaft Lark Bridge · 绑定配置');
+    console.log('配置会在你确认后保存。按 Ctrl+C 可随时退出。');
+    console.log('\n1/4  选择飞书账号');
     const enteredBinary = previous?.larkBinary ?? ((await ask('lark-cli 路径 [lark-cli]：')) || 'lark-cli');
     const binary = /[/\\]/.test(enteredBinary) ? resolve(enteredBinary) : enteredBinary;
     const lark = makeLark(binary);
     const profiles = await lark.profiles();
     if (!Array.isArray(profiles) || !profiles.length) throw new Error('本机没有 Lark CLI profile，请先完成 lark-cli config init 和 auth login。');
     listOptions(profiles.map((row) => `${row.name} · ${row.user ?? '未登录'} · ${row.brand}`));
-    const choice = (await ask('选择飞书 profile [1]：')) || '1';
-    const profile = profiles[indexOfAnswer(choice, profiles.length)]?.name ?? profiles.find((row) => row.name === choice)?.name;
-    if (!profile) throw new Error('没有这个 Lark CLI profile。');
+    const { name: profile } = await selectOption(ask, '选择飞书 profile [1]：', profiles, { fallback: '1', named: true });
     const user = await lark.identity(profile, true);
     console.log(`飞书身份  ${clean(user.userName)} · ${clean(user.brand)} · ${clean(user.userId)}`);
 
+    console.log('\n2/4  连接 Raft');
     const url = previous?.raft.url ?? raftOrigin((await ask('Raft API 地址 [https://api.raft.build]：')) || 'https://api.raft.build');
     if (previous) token = await loadCredential(files);
     else {
       console.log('请在 Raft → Members → Connect an external agent 中创建桥接身份，选择 Build your own。');
+      console.log('上面创建的身份负责转发消息。下一步会选择实际处理消息的 Agent。');
       token = await questions.secret('粘贴桥接用的 sk_agent_ 凭证（输入不会显示）：');
       if (!/^sk_agent_[A-Za-z0-9_-]+$/.test(token)) throw new Error('Raft 凭证格式无效。');
     }
@@ -122,13 +136,13 @@ async function setup(files) {
       throw new Error('当前凭证对应的 Raft 桥接身份与本地配置不同。');
     }
     console.log(`Raft 服务器  ${clean(context.serverName)} · 桥接身份 @${clean(context.bridgeName)}`);
+    console.log('\n3/4  选择目标 Agent 和会话');
     const handle = (await ask('目标 Raft Agent 的 @handle：')).replace(/^@/, '');
     if (!HANDLE.test(handle)) throw new Error('请输入目标 Agent 的 @handle。');
     const agent = await raft.agent(handle);
     const modes = Object.entries(MODES);
     listOptions(modes.map(([, label]) => label));
-    const mode = modes[indexOfAnswer(await ask('选择转发规则：'), modes.length)]?.[0];
-    if (!mode) throw new Error('请选择有效的转发规则。');
+    const [mode] = await selectOption(ask, '选择转发规则：', modes);
     const chat = await chooseChat(lark, profile, user, mode, ask);
     const name = (await ask(`给这条绑定命名 [${clean(chat.name)} → @${clean(agent.handle)}]：`)) || `${chat.name} → @${agent.handle}`;
 
@@ -138,7 +152,8 @@ async function setup(files) {
       version: 1, larkBinary: binary, raft: { url, serverId: context.serverId, bridgeId: context.bridgeId },
       pollSeconds: previous?.pollSeconds ?? 20, bindings: [...(previous?.bindings ?? []), binding],
     });
-    console.log(`\n${MODES[mode]} ${clean(chat.name)} → @${clean(agent.handle)} → 以 ${clean(user.userName)} 身份回复原会话`);
+    console.log('\n4/4  预览并启用');
+    console.log(`${MODES[mode]} ${clean(chat.name)} → @${clean(agent.handle)} → 以 ${clean(user.userName)} 身份回复原会话`);
     showPreview(await previewBinding(lark, binding));
     if (!/^(y|yes|是)$/i.test(await ask('保存并启用自动转发与本人身份回复？[y/N]：'))) {
       return console.log('未保存。');
@@ -146,7 +161,8 @@ async function setup(files) {
     binding.enabledAt = Date.now();
     if (!previous) await writeJson(files.credential, { token });
     await writeJson(files.config, config);
-    console.log(`已保存绑定 ${binding.id.slice(0, 8)}。运行 raft-lark-bridge run 开始处理。`);
+    const start = process.env.npm_lifecycle_event === 'setup' ? 'npm run doctor，然后运行 npm start' : 'raft-lark-bridge doctor，然后运行 raft-lark-bridge run';
+    console.log(`已保存绑定 ${binding.id.slice(0, 8)}。运行 ${start}。`);
   } finally { questions.close(); }
 }
 
