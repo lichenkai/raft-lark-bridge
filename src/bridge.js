@@ -123,7 +123,7 @@ export async function bridgeCycle({ config, store, lark, raft, loadCurrentConfig
           const job = store.byThread(reply.thread);
           if (!job || job.state !== 'forwarded') continue;
           const binding = config.bindings.find((row) => row.id === job.binding_id && routeKey(row) === job.binding_key);
-          if (!binding || (reply.senderId && reply.senderId !== binding.agentId)) continue;
+          if (!binding || reply.senderId !== binding.agentId) continue;
           store.prepareReply(job.id, reply.text);
         }
         if (Number.isSafeInteger(batch.cursor) && (cursor === null || batch.cursor > cursor)) store.set(key, batch.cursor);

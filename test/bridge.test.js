@@ -86,6 +86,8 @@ test('two identities route text and reply to the original source after a restart
   env.state.cursor = 11;
   env.state.time += 20_000;
   env.state.inbox = [response(b, secondRoot, '只是进度'), response(b, secondRoot),
+    response(a, firstRoot, '/lark-reply\n身份不明', { raw: {} }),
+    response(a, firstRoot, '/lark-reply\n受委托的回复', { raw: { sender_id: a.agentId, delegatedBy: { name: 'another-agent' } } }),
     response(a, firstRoot, '/lark-reply\n伪造', { raw: { sender_id: b.agentId } }), response(a, firstRoot)];
   assert.deepEqual(await env.run(db), { queued: 0, forwarded: 0, replied: 2, errors: 0 });
   assert.deepEqual(env.replies.map(({ profile, originalId, text }) => [profile, originalId, text]), [

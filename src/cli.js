@@ -25,7 +25,7 @@ const usage = `Raft ↔ Lark 本地桥接
   raft-lark-bridge pause <绑定>             暂停绑定
   raft-lark-bridge resume <绑定>            恢复绑定
   raft-lark-bridge unbind <绑定>            解除绑定
-  raft-lark-bridge service install|start|stop|remove  管理 macOS 后台服务
+  raft-lark-bridge service install|start|stop|remove  管理 macOS / Linux (systemd) 后台服务
 
 全局选项  --data-dir <目录>，默认 ~/.raft-lark-bridge
 绑定参数可用名称或 status 显示的 ID。
@@ -252,9 +252,11 @@ async function main() {
   if (extra.length || (values.once && command !== 'run')) throw new Error('参数无效。请运行 --help。');
   const files = paths(values['data-dir']);
   if (command === 'setup' && !argument) return setup(files);
+  const entry = fileURLToPath(import.meta.url);
+  if (command === 'service' && argument !== 'install') return service(argument, files, undefined, entry);
   await ensureDirectory(files);
   const config = await loadConfig(files);
-  if (command === 'service') return service(argument, files, config, fileURLToPath(import.meta.url));
+  if (command === 'service') return service(argument, files, config, entry);
   if (command === 'status' && !argument) {
     const store = new Store(files.database);
     try { return status(config, store); } finally { store.close(); }

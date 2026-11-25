@@ -70,7 +70,7 @@ export function threadKey(target) {
 
 export function explicitReply(message) {
   if (message.sender.type !== 'agent' || !message.id || !threadKey(message.target)) return null;
-  if (message.raw?.posted_by || message.raw?.voiceCallId || message.raw?.delegated_by) return null;
+  if (message.raw?.posted_by || message.raw?.voiceCallId || message.raw?.delegated_by || message.raw?.delegatedBy) return null;
   const match = /^\/lark-reply[ \t]*\r?\n([\s\S]+)$/.exec(message.content.trim());
   if (!match || !match[1].trim()) return null;
   return { thread: threadKey(message.target), text: match[1].trim(),

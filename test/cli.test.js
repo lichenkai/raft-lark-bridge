@@ -15,17 +15,19 @@ const entry = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 test('the CLI runs a simulated Lark executable and a Raft HTTP service end to end', { skip: process.platform === 'win32' }, async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'raft-lark-cli-'));
   const binary = join(home, 'lark-cli');
+  const eventTime = new Date(Date.now() - 6000).toISOString().slice(0, 16).replace('T', ' ');
   t.after(() => rm(home, { recursive: true, force: true }));
   await writeFile(binary, `#!${process.execPath}
 const fs = require('node:fs');
 const args = process.argv.slice(2);
+if (process.env.TZ !== 'UTC') process.exit(12);
 const out = (data) => console.log(JSON.stringify({ ok: true, data }));
 if (args.includes('status')) out({ appId: 'cli_app', brand: 'feishu', identities: { user: {
   available: true, openId: 'ou_me', userName: '本人', verified: true,
 } } });
 else if (args.includes('+messages-search')) out({ has_more: false, messages: [{
   message_id: 'om_first', chat_id: 'oc_group', sender: { id: 'ou_colleague', sender_type: 'user' },
-  content: '需要帮助', create_time: ${Date.now() - 6000}, msg_type: 'text',
+  content: '需要帮助', create_time: ${JSON.stringify(eventTime)}, msg_type: 'text',
 }] });
 else if (args.includes('+messages-reply')) {
   if (!args.includes('om_first') || !args.includes('person') || !args.includes('user') || fs.readFileSync(0, 'utf8') !== '收到。') process.exit(9);
@@ -72,7 +74,9 @@ else if (args.includes('+messages-reply')) {
     agentId: 'target-id', agentHandle: 'target', chatId: 'oc_group', mode: 'group', enabled: true, enabledAt: Date.now() - 60_000 }] };
   await writeFile(join(home, 'config.json'), JSON.stringify(config), { mode: 0o600 });
   await writeFile(join(home, 'raft-credential.json'), JSON.stringify({ token: 'sk_agent_mock' }), { mode: 0o600 });
-  const run = (...args) => exec(process.execPath, [entry, '--data-dir', home, ...args], { timeout: 6000 });
+  const run = (...args) => exec(process.execPath, [entry, '--data-dir', home, ...args], {
+    timeout: 6000, env: { ...process.env, TZ: 'America/New_York' },
+  });
   const preview = await run('preview', 'test-rule');
   assert.match(preview.stdout, /需要帮助/);
   assert.equal(paths.length, 0);

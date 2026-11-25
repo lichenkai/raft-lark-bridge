@@ -19,7 +19,10 @@ function errorCode(value) {
 
 export function runLark(binary, args, input) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    // Lark CLI formats message timestamps in local time without an offset.
+    const child = spawn(binary, args, {
+      shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, TZ: 'UTC' },
+    });
     let stdout = '';
     let stderr = '';
     let fault;
@@ -60,6 +63,7 @@ export function runLark(binary, args, input) {
 function timeValue(value) {
   if (typeof value !== 'string' && typeof value !== 'number') return NaN;
   if (/^\d{10,13}$/.test(String(value))) return Number(value) * (String(value).length === 10 ? 1000 : 1);
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)) return Date.parse(value.replace(' ', 'T') + ':00Z');
   return Date.parse(value);
 }
 

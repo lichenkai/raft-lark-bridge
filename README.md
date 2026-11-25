@@ -111,15 +111,18 @@ npx skills add lichenkai/raft-lark-bridge --skill raft-lark-bridge
 
 同一飞书登录身份与会话的组合只允许一条绑定。更改规则时，先解除旧绑定，再运行 `setup`。配置、Raft 凭证和 SQLite 数据库默认存放在 `~/.raft-lark-bridge`。可以用 `--data-dir <目录>` 管理独立的配置，例如为另一台 Raft 服务器建立桥接。
 
-## macOS 后台运行
+## 后台运行
 
-先停止前台进程，再用运行 `lark-cli` 的同一个 macOS 账号安装并启动用户级 LaunchAgent。
+先停止前台进程，再用已授权 `lark-cli` 的同一个系统账号安装并启动服务。
 
 ```bash
 npm run bridge -- service install
 ```
 
-把命令末尾的 `install` 换成 `stop`、`start` 或 `remove` 管理后台服务。状态和错误代码写入数据目录中的 `bridge.log`。绑定修改在下一轮生效。移动安装位置后，重新运行 `service install`。需要前台运行时使用 `npm start`。
+- **macOS** 使用用户级 LaunchAgent。状态和错误代码写入数据目录中的 `bridge.log`。
+- **Ubuntu、CentOS Stream 等 systemd Linux** 使用 `systemctl --user` 管理服务。通过 SSH 登录运行账号并完成飞书 CLI 授权和桥接配置。要在系统启动后自动运行，并在退出 SSH 后继续运行，请让管理员执行 `sudo loginctl enable-linger <运行账号>`。服务安装后会显示对应的 `journalctl --user -u <unit>` 日志命令。[systemd 用户服务与 linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20USER%E2%80%A6)
+
+把命令末尾的 `install` 换成 `stop`、`start` 或 `remove` 管理后台服务。移除服务会保留绑定和 SQLite 状态。用了自定义 `--data-dir` 时，每条服务命令都应传同一个目录。绑定修改在下一轮生效。移动安装位置或更换 Node.js 路径后，重新运行 `service install`。需要前台运行时使用 `npm start`。
 
 ## 消息投递与数据
 
@@ -252,15 +255,18 @@ Run `npm run setup` again to add a binding. Use a binding name or the ID shown b
 
 Each Lark login and chat pair can have one binding. To change its rule, remove the existing binding and run `setup` again. Configuration, the Raft credential, and the SQLite database live in `~/.raft-lark-bridge` by default. Use `--data-dir <directory>` to manage an independent configuration, such as a bridge for a different Raft server.
 
-### Run in the background on macOS
+### Run in the background
 
-Stop the foreground process, then install and start the user-level LaunchAgent under the same macOS account that runs `lark-cli`.
+Stop the foreground process, then install and start the service under the same OS account that authorized `lark-cli`.
 
 ```bash
 npm run bridge -- service install
 ```
 
-Replace `install` in the command above with `stop`, `start`, or `remove` to manage it. The service writes status and error codes to `bridge.log` in the data directory. Binding changes take effect on the next cycle. If you move the installation, run `service install` again. For foreground use, run `npm start`.
+- **macOS** uses a user-level LaunchAgent. Status and error codes go to `bridge.log` in the data directory.
+- **Ubuntu, CentOS Stream, and other Linux distributions with systemd** use `systemctl --user`. Sign in over SSH as the service account to authorize Lark CLI and configure the bridge. To run at boot and stay active after SSH logout, have an administrator run `sudo loginctl enable-linger <service-account>`. Installation displays the `journalctl --user -u <unit>` command for viewing logs. [systemd user lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20USER%E2%80%A6)
+
+Replace `install` with `stop`, `start`, or `remove` to manage the service. Removing it preserves bindings and SQLite state. If you use a custom `--data-dir`, pass the same directory to every service command. Binding changes take effect on the next cycle. Run `service install` again if you move the checkout or change the Node.js path. For foreground use, run `npm start`.
 
 ### Delivery and data
 
