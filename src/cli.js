@@ -25,10 +25,12 @@ const usage = `Raft ↔ Lark 本地桥接
   raft-lark-bridge status                  查看绑定、队列和错误
   raft-lark-bridge doctor                  检查两端身份和消息读取
   raft-lark-bridge preview <绑定>           查看匹配预览
+  raft-lark-bridge start [--debug]          后台启动，或在前台实时输出调试日志
   raft-lark-bridge run [--once] [--debug]  前台运行，或处理一轮
   raft-lark-bridge pause <绑定>             暂停绑定
   raft-lark-bridge resume <绑定>            恢复绑定
   raft-lark-bridge unbind <绑定>            解除绑定
+  raft-lark-bridge clear                    选择并删除一条绑定
   raft-lark-bridge service install|start|stop|remove  管理 macOS / Linux (systemd) 后台服务
   raft-lark-bridge service install --debug            启用后台调试日志
 
@@ -62,8 +64,8 @@ function showPreview(samples) {
   for (const sample of samples) console.log(`  ${new Date(sample.sentAt).toLocaleString()}  ${clean(sample.content).slice(0, 120)}`);
 }
 
-function makeQuestions() {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('请在终端中运行 setup。');
+function makeQuestions(command) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(`请在终端中运行 ${command}。`);
   let muted = false;
   const output = new Writable({ write(chunk, encoding, callback) {
     if (muted) callback();
@@ -109,7 +111,7 @@ async function setup(files) {
   await ensureDirectory(files);
   const previous = await readJson(files.config, null);
   if (previous) validateConfig(previous);
-  const questions = makeQuestions();
+  const questions = makeQuestions('setup');
   const { ask } = questions;
   let token;
   try {
@@ -215,8 +217,39 @@ function status(config, store) {
   if (inbox) console.log(`\nRaft 收件箱  ${new Date(inbox.at).toLocaleString()}  ${inbox.code ?? '正常'}`);
 }
 
-async function run(files, firstConfig, raft, { once, debug }) {
+async function unbind(files, config, binding) {
+  config.bindings = config.bindings.filter((row) => row.id !== binding.id);
+  await writeJson(files.config, config);
+  console.log(`${clean(binding.name)}  已解除绑定`);
+}
+
+async function clearBinding(files, config) {
+  if (!config.bindings.length) return console.log('暂无可删除的绑定。');
+  const questions = makeQuestions('clear');
+  try {
+    listOptions(config.bindings.map((binding) => `${binding.id.slice(0, 8)} · ${binding.name} · ${MODES[binding.mode]} · ${binding.chatId} → @${binding.agentHandle}`));
+    const selected = await selectOption(questions.ask, '选择要删除的绑定编号：', config.bindings);
+    const confirmation = await questions.ask(`删除「${clean(selected.name)}」并停止该会话的自动转发和回信？[y/N]：`);
+    if (!/^(y|yes|是)$/i.test(confirmation)) return console.log('未删除任何绑定。');
+    const current = await loadConfig(files);
+    const binding = current.bindings.find((row) => row.id === selected.id);
+    if (!binding) throw new Error('该绑定已不存在。');
+    return unbind(files, current, binding);
+  } finally {
+    questions.close();
+  }
+}
+
+async function run(files, firstConfig, raft, { once, debug, managed, foregroundDebug }) {
+  if (foregroundDebug) {
+    assertRaftIdentity(firstConfig, await raft.context());
+    await service('stop-if-running', files);
+  }
   const unlock = acquireLock(files.lock);
+  if (debug && !managed) {
+    runLog = fileLog(files.log);
+    console.log(`调试日志同时写入 ${files.log}`);
+  }
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.on('SIGINT', stop);
@@ -228,8 +261,9 @@ async function run(files, firstConfig, raft, { once, debug }) {
     if (event.event === 'raft.forwarded') replySleep?.abort();
     if (event.level === 'debug' && !debug) return;
     const line = JSON.stringify(event);
-    if (runLog) runLog(line);
-    else if (event.level === 'error') console.error(line);
+    runLog?.(line);
+    if (managed) return;
+    if (event.level === 'error') console.error(line);
     else console.log(line);
   };
   const poll = async (phase) => {
@@ -270,7 +304,7 @@ async function run(files, firstConfig, raft, { once, debug }) {
     }
   };
   try {
-    assertRaftIdentity(firstConfig, await raft.context());
+    if (!foregroundDebug) assertRaftIdentity(firstConfig, await raft.context());
     store = new Store(files.database);
     store.migrateForwardText();
     console.log('桥接正在运行。按 Ctrl+C 停止。');
@@ -300,8 +334,9 @@ async function main() {
   } });
   const [command, argument, ...extra] = positionals;
   if (!command || values.help || command === 'help') return console.log(usage);
+  const start = command === 'start' && !argument;
   if (extra.length || ((values.once || values.managed) && command !== 'run') ||
-      (values.debug && command !== 'run' && !(command === 'service' && argument === 'install'))) {
+      (values.debug && !start && command !== 'run' && !(command === 'service' && argument === 'install'))) {
     throw new Error('参数无效。请运行 --help。');
   }
   const files = paths(values['data-dir']);
@@ -311,29 +346,31 @@ async function main() {
   await ensureDirectory(files);
   if (values.managed) runLog = fileLog(files.log);
   const config = await loadConfig(files);
-  if (command === 'service') {
+  const foregroundDebug = start && values.debug;
+  if (command === 'service' || (start && !foregroundDebug)) {
     await makeLark(config.larkBinary).requireReplySupport();
-    return service(argument, files, config, entry, values.debug);
+    return service('install', files, config, entry, values.debug);
   }
   if (command === 'status' && !argument) {
     const store = new Store(files.database);
     try { return status(config, store); } finally { store.close(); }
   }
+  if (command === 'clear' && !argument) return clearBinding(files, config);
   if (['pause', 'resume', 'unbind'].includes(command) && argument) {
     const binding = findBinding(config, argument);
-    if (command === 'unbind') config.bindings = config.bindings.filter((row) => row.id !== binding.id);
-    else binding.enabled = command === 'resume';
+    if (command === 'unbind') return unbind(files, config, binding);
+    binding.enabled = command === 'resume';
     await writeJson(files.config, config);
-    console.log(`${clean(binding.name)}  ${{ pause: '已暂停', resume: '已恢复', unbind: '已解除绑定' }[command]}`);
+    console.log(`${clean(binding.name)}  ${binding.enabled ? '已恢复' : '已暂停'}`);
     return;
   }
   const lark = makeLark(config.larkBinary);
   if (command === 'preview' && argument) return showPreview(await previewBinding(lark, findBinding(config, argument)));
-  if (!['doctor', 'run'].includes(command) || argument) throw new Error('用法无效。请运行 --help。');
+  if ((!foregroundDebug && !['doctor', 'run'].includes(command)) || argument) throw new Error('用法无效。请运行 --help。');
   await lark.requireReplySupport();
   const raft = makeRaft(config.raft.url, await loadCredential(files));
   if (command === 'doctor') return doctor(config, lark, raft);
-  return run(files, config, raft, values);
+  return run(files, config, raft, { ...values, foregroundDebug });
 }
 
 main().catch((error) => {

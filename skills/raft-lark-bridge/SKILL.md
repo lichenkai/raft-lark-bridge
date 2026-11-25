@@ -37,6 +37,7 @@ Run `npm run status` to resolve the requested binding and check its current stat
 | See which messages match | `npm run bridge -- preview <binding>` |
 | Temporarily stop one binding | `npm run bridge -- pause <binding>` |
 | Resume a paused binding | `npm run bridge -- resume <binding>` |
+| Pick and remove one binding interactively | `npm run clear` |
 | Remove one binding | `npm run bridge -- unbind <binding>` |
 
 Pausing preserves the binding and its saved position. A request already submitted may finish. Resuming continues from the saved position. Use `npm stop` when the user wants to stop the whole bridge process.
@@ -46,7 +47,7 @@ To change a binding's mode, identify its profile, chat ID, target Agent, and des
 ## Verify and troubleshoot
 
 - `npm run doctor` checks identity and reading. A preview can be empty even when the binding is valid.
-- Use `npm start -- --debug` and `bridge.log` in the data directory for background diagnostics. Use `npm run foreground -- --debug` after stopping the background process when the user wants a foreground test.
+- Use `npm start -- --debug` for foreground diagnostics with live terminal output and a copy in `bridge.log`. It stops a running background service for the same data directory. Press Ctrl+C to stop, then run `npm start` to return to the background. For background debug logging, use `npm run bridge -- service install --debug`.
 - For a live test, use an agreed chat and a new plain-text message from a different Lark account. Under `指定群聊 @我`, that message must actually mention the bound account. Raft receives the target Agent's handle in place of that mention. The bridge sends the Agent's first text reply from the corresponding thread back to the original Lark message. Verify the chat, in-reply-to message, body, and sender. `npm run bridge -- run --once` can process active bindings and send messages. Use it with an explicit request for a live run.
 - For `LARK_IDENTITY_CHANGED`, check the profile and the signed-in user before resuming. For a reply marked for review, check the original Lark conversation before any manual resend.
 

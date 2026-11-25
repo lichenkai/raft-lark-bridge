@@ -89,6 +89,18 @@ test('systemd reports an unavailable user manager before attempting installation
   assert.deepEqual(await readCalls(), [['--user', 'show-environment']]);
 });
 
+test('foreground debug stops an active systemd bridge and skips an inactive one', async (t) => {
+  const { env, run, readCalls } = await fixture(t);
+  await run('stop-if-running');
+  env.TEST_FAIL_COMMAND = 'is-active';
+  await run('stop-if-running');
+  const calls = await readCalls();
+  const unit = calls[0][3];
+  assert.deepEqual(calls, [
+    ['--user', 'is-active', '--quiet', unit], ['--user', 'stop', unit], ['--user', 'is-active', '--quiet', unit],
+  ]);
+});
+
 test('systemd restores the previous unit after a failed debug restart and can retry', async (t) => {
   const { env, run, readCalls } = await fixture(t);
   await run('install');

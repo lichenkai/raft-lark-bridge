@@ -100,6 +100,7 @@ npx skills add lichenkai/raft-lark-bridge --skill raft-lark-bridge
 | `npm run bridge -- preview <绑定>` | 预览命中的消息，无需转发 |
 | `npm run bridge -- pause <绑定>` | 暂停绑定，已经提交的请求仍可能完成 |
 | `npm run bridge -- resume <绑定>` | 继续处理待办消息，从保存的位置补读 |
+| `npm run clear` | 列出绑定，选择并确认删除一条 |
 | `npm run bridge -- unbind <绑定>` | 解除绑定 |
 | `npm run bridge -- run --once` | 执行一轮实际转发和回复 |
 
@@ -123,7 +124,9 @@ tail -F ~/.raft-lark-bridge/bridge.log
 
 `npm stop` 停止后台服务。`npm run bridge -- service remove` 移除服务，保留绑定和 SQLite 状态。自定义 `--data-dir` 时，管理命令需传同一个目录，`bridge.log` 也在该目录内。绑定修改在下一轮生效。移动安装位置或更换 Node.js 路径后，再运行 `npm start`。
 
-`npm start -- --debug` 开启后台调试，普通 `npm start` 恢复常态日志。前台联调用 `npm run foreground -- --debug`，如有后台进程先运行 `npm stop`。后台日志包含关键事件、时间、短 ID 和错误码。每达到 8 MiB 就轮转一次，保留一份 `bridge.log.1`。调试模式额外记录每轮处理、Lark 身份检查、会话历史、搜索和 Raft 收件箱耗时。
+`npm start -- --debug` 切到当前终端持续运行，同时把调试日志写到 `bridge.log`。同一配置的后台服务正在运行时，会先停止它。用 Ctrl+C 结束前台调试，再运行 `npm start` 恢复后台运行。需要后台持续记录调试日志时，使用 `npm run bridge -- service install --debug`。
+
+日志包含关键事件、时间、短 ID 和错误码。每达到 8 MiB 就轮转一次，保留一份 `bridge.log.1`。调试模式额外记录每轮处理、Lark 身份检查、会话历史、搜索和 Raft 收件箱耗时。
 
 按同一个 `job` 串起 `lark.detected`、`raft.forwarded`、`raft.reply_observed` 和 `lark.replied`。转发和回信的 `durationMs` 是各自调用耗时。回信观测中的 `waitMs` 是桥接确认转发到发现回复的时间，`agentPathMs` 用 Raft 的发信时间估算 Agent 路径耗时，`inboxDelayMs` 是发布到被桥接发现的估计耗时。估算依赖 Raft 提供时间戳以及两端时钟同步。Agent 路径包含排队、模型与可能的工具调用，模型耗时需用 Agent 运行时的时间戳确认。`lark.detected` 中，`source=history` 的原消息时间来自会话历史接口，`source=search` 的时间通常只有分钟精度。
 
@@ -249,6 +252,7 @@ Run `npm run setup` again to add a binding. Use a binding name or the ID shown b
 | `npm run bridge -- preview <binding>` | Preview matching messages without forwarding |
 | `npm run bridge -- pause <binding>` | Pause a binding. Requests already submitted can still finish |
 | `npm run bridge -- resume <binding>` | Resume pending work and catch up from the saved search position |
+| `npm run clear` | List bindings and confirm which one to remove |
 | `npm run bridge -- unbind <binding>` | Remove a binding |
 | `npm run bridge -- run --once` | Run one cycle with forwarding and replies enabled |
 
@@ -272,7 +276,9 @@ tail -F ~/.raft-lark-bridge/bridge.log
 
 Use `npm stop` to stop the background service and `npm run bridge -- service remove` to remove it while preserving bindings and SQLite state. If you use a custom `--data-dir`, pass it to every service command and look for `bridge.log` in that directory. Binding changes take effect on the next cycle. Run `npm start` again if you move the checkout or change the Node.js path.
 
-Use `npm start -- --debug` for background diagnostics and `npm start` to return to normal logging. For a foreground test, stop the background service and run `npm run foreground -- --debug`. Background logs record key events, timestamps, short IDs, and error codes. Logs rotate at 8 MiB and retain one previous file, `bridge.log.1`. Debug mode adds cycle, Lark identity, chat history and search, and Raft inbox timings.
+Use `npm start -- --debug` to keep the bridge running in the current terminal and write the same debug events to `bridge.log`. It first stops a running background service for the same configuration. Press Ctrl+C to end the foreground run, then run `npm start` to return to background operation. For debug logging in the background, use `npm run bridge -- service install --debug`.
+
+Logs record key events, timestamps, short IDs, and error codes. They rotate at 8 MiB and retain one previous file, `bridge.log.1`. Debug mode adds cycle, Lark identity, chat history and search, and Raft inbox timings.
 
 Follow a `job` across `lark.detected`, `raft.forwarded`, `raft.reply_observed`, and `lark.replied`. The forwarding and delivery events record API call duration in `durationMs`. The reply observation records total bridge wait in `waitMs`, estimated time on the Agent path in `agentPathMs`, and estimated time from Raft publication to bridge observation in `inboxDelayMs`. These estimates depend on Raft timestamps and synchronized clocks. The Agent path includes queuing, model execution, and any tool calls. Use Agent runtime timestamps to measure model time. In `lark.detected`, `source=history` records the original timestamp from chat history. `source=search` usually has minute precision.
 

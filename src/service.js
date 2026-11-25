@@ -91,8 +91,9 @@ export function launchAgentPlist({ label, node, entry, home, environment, debug 
 }
 
 export async function service(action, files, config, entry, debug = false) {
-  if (!['install', 'start', 'stop', 'remove'].includes(action)) throw new Error('用法：service install|start|stop|remove');
+  if (!['install', 'start', 'stop', 'stop-if-running', 'remove'].includes(action)) throw new Error('用法：service install|start|stop|remove');
   if (process.platform === 'linux') return systemdService(action, files, config, entry, process.env, debug);
+  if (action === 'stop-if-running' && process.platform !== 'darwin') return;
   if (process.platform !== 'darwin') throw new Error('后台服务支持 macOS 和使用 systemd 的 Linux。可用 run 前台运行。');
   const label = `local.raft-lark-bridge.${hash([files.home]).slice(0, 12)}`;
   const directory = join(homedir(), 'Library', 'LaunchAgents');
@@ -119,8 +120,10 @@ export async function service(action, files, config, entry, debug = false) {
     console.log('已移除 macOS 后台服务，绑定和状态仍保留在本机。');
     return;
   }
-  if (action === 'stop') {
-    if (isLoaded()) await unload();
+  if (action === 'stop' || action === 'stop-if-running') {
+    const loaded = isLoaded();
+    if (!loaded && action === 'stop-if-running') return;
+    if (loaded) await unload();
     console.log('后台服务已停止。');
     return;
   }
@@ -177,6 +180,13 @@ export async function systemdService(action, files, config, entry, env = process
       throw new Error(`systemctl --user ${args[0]} 失败：${detail}`);
     }
   };
+  if (action === 'stop-if-running') {
+    if (systemctl(['is-active', '--quiet', unit]).status === 0) {
+      invoke('stop', unit);
+      console.log('后台服务已停止。');
+    }
+    return;
+  }
   if (action === 'start' || action === 'stop') {
     invoke(action, unit);
     console.log(action === 'start' ? `后台服务已启动，日志在 ${files.log}` : '后台服务已停止。');

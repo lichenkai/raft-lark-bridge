@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -19,6 +19,7 @@ test('CLI help and setup do not load SQLite', { skip: process.platform === 'win3
   t.after(() => rm(directory, { recursive: true, force: true }));
   const help = await exec(process.execPath, [entry, 'help']);
   assert.match(help.stdout, /setup/);
+  assert.match(help.stdout, /clear/);
   assert.doesNotMatch(help.stderr, /SQLite is an experimental feature/);
   await assert.rejects(exec(process.execPath, [entry, 'setup', '--data-dir', directory]), (error) => {
     assert.match(error.stderr, /请在终端中运行 setup/);
@@ -142,6 +143,35 @@ else if (args.includes('+messages-reply')) {
   assert.match((await run('resume', 'test-rule')).stdout, /已恢复/);
   assert.match((await run('run', '--once')).stdout, /入队 0 · 转发 0 · 回复 0 · 错误 0/);
   assert.match((await run('unbind', 'test-rule')).stdout, /已解除绑定/);
+
+  const debug = spawn(process.execPath, [entry, 'start', '--debug', '--data-dir', home], {
+    env: { ...process.env, MOCK_LARK_VERSION: '1.0.97' },
+  });
+  const closed = new Promise((resolve) => debug.once('close', resolve));
+  let stdout = '';
+  let stderr = '';
+  let timeout;
+  debug.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+  try {
+    await new Promise((resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error('Foreground debug did not log a cycle')), 6000);
+      debug.once('error', reject);
+      debug.once('close', (code) => reject(new Error(`Foreground debug exited (${code}): ${stderr}`)));
+      debug.stdout.setEncoding('utf8').on('data', (chunk) => {
+        stdout += chunk;
+        if (stdout.includes('"event":"bridge.cycle","phase":"reply"')) resolve();
+      });
+    });
+    assert.equal(debug.exitCode, null);
+    assert.match(stdout, /调试日志.*bridge\.log/);
+    assert.match(await readFile(join(home, 'bridge.log'), 'utf8'), /"event":"bridge\.cycle","phase":"reply"/);
+  } finally {
+    clearTimeout(timeout);
+    debug.kill('SIGINT');
+    await closed;
+  }
+  assert.equal(debug.exitCode, 0);
+  assert.match(stdout, /"event":"bridge\.stopped"/);
 });
 
 test('the local log rotates without losing the previous file', async (t) => {

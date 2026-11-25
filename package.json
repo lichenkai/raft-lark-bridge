@@ -13,8 +13,9 @@
     "setup": "node src/cli.js setup",
     "doctor": "node src/cli.js doctor",
     "status": "node src/cli.js status",
-    "start": "node src/cli.js service install",
+    "start": "node src/cli.js start",
     "stop": "node src/cli.js service stop",
+    "clear": "node src/cli.js clear",
     "foreground": "node src/cli.js run",
     "bridge": "node src/cli.js",
     "test": "node --test"
