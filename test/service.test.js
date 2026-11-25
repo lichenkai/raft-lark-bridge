@@ -37,28 +37,30 @@ if (args.includes(process.env.TEST_FAIL_COMMAND)) {
   const entry = join(directory, 'checkout', 'cli.js');
   const config = { larkBinary: 'lark-cli' };
   const readCalls = async () => (await readFile(calls, 'utf8')).trim().split('\n').map(JSON.parse);
-  const run = (action) => systemdService(action, files, config, entry, env);
+  const run = (action, debug) => systemdService(action, files, config, entry, env, debug);
   const manage = (action) => process.platform === 'linux'
     ? exec(process.execPath, [cli, '--data-dir', files.home, 'service', action], { env })
     : run(action);
-  return { env, readCalls, run, manage };
+  return { files, env, readCalls, run, manage };
 }
 
 test('systemd installs, manages and removes a user service for the configured data directory', async (t) => {
-  const { env, run, readCalls, manage } = await fixture(t);
-  await run('install');
+  const { files, env, run, readCalls, manage } = await fixture(t);
+  await run('install', true);
   const calls = await readCalls();
   const unit = calls[2][2];
   assert.match(unit, /^raft-lark-bridge-[a-f0-9]{12}\.service$/);
   const path = join(env.XDG_CONFIG_HOME, 'systemd', 'user', unit);
   const definition = await readFile(path, 'utf8');
-  assert.match(definition, /ExecStart=":\/[^"]+" "[^"]+" "--data-dir" "[^\n]+ %%h \$\{HOME\} \\"quote\\" \\\\path" "run"/);
+  assert.match(definition, /ExecStart=":\/[^"]+" "[^"]+" "--data-dir" "[^\n]+ %%h \$\{HOME\} \\"quote\\" \\\\path" "run" "--managed" "--debug"/);
+  assert.equal(await readFile(files.log, 'utf8'), '');
   assert.ok(definition.includes('Environment="LARKSUITE_CLI_CONFIG_DIR=' + env.LARKSUITE_CLI_CONFIG_DIR.replace('%', '%%') + '"'));
   assert.ok(definition.includes('Environment="LARKSUITE_CLI_DATA_DIR=' + env.LARKSUITE_CLI_DATA_DIR + '"'));
   assert.ok(definition.includes(`Environment="PATH=${env.PATH}:${dirname(process.execPath)}:`));
   assert.match(definition, /Restart=on-failure\nRestartSec=15s/);
   assert.match(definition, /KillMode=mixed\nTimeoutStopSec=60s/);
   assert.match(definition, /WantedBy=default.target/);
+  await run('install', true);
   // The CLI can still manage an installed service when the data directory is unavailable.
   await manage('start');
   await manage('stop');
@@ -69,6 +71,10 @@ test('systemd installs, manages and removes a user service for the configured da
     ['--user', 'daemon-reload'],
     ['--user', 'enable', unit],
     ['--user', 'restart', unit],
+    ['--user', 'show-environment'],
+    ['--user', 'is-active', '--quiet', unit],
+    ['--user', 'enable', unit],
+    ['--user', 'start', unit],
     ['--user', 'start', unit],
     ['--user', 'stop', unit],
     ['--user', 'disable', '--now', unit],
@@ -81,4 +87,19 @@ test('systemd reports an unavailable user manager before attempting installation
   env.TEST_FAIL_COMMAND = 'show-environment';
   await assert.rejects(run('install'), /systemctl --user.*mock systemctl failure/);
   assert.deepEqual(await readCalls(), [['--user', 'show-environment']]);
+});
+
+test('systemd restores the previous unit after a failed debug restart and can retry', async (t) => {
+  const { env, run, readCalls } = await fixture(t);
+  await run('install');
+  const unit = (await readCalls())[2][2];
+  const path = join(env.XDG_CONFIG_HOME, 'systemd', 'user', unit);
+  const previous = await readFile(path, 'utf8');
+  env.TEST_FAIL_COMMAND = 'restart';
+  await assert.rejects(run('install', true), /systemctl --user restart/);
+  assert.equal(await readFile(path, 'utf8'), previous);
+  assert.deepEqual((await readCalls()).slice(-2), [['--user', 'daemon-reload'], ['--user', 'start', unit]]);
+  delete env.TEST_FAIL_COMMAND;
+  await run('install', true);
+  assert.match(await readFile(path, 'utf8'), /"--debug"/);
 });

@@ -1,5 +1,12 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
+
+const require = createRequire(import.meta.url);
+
+function openDatabase(path) {
+  const { DatabaseSync } = require('node:sqlite');
+  return new DatabaseSync(path);
+}
 
 export function hash(parts) {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 40);
@@ -10,7 +17,7 @@ export function routeKey(binding) {
 }
 
 export function acquireLock(path) {
-  const lock = new DatabaseSync(path);
+  const lock = openDatabase(path);
   try { lock.exec('BEGIN EXCLUSIVE'); } catch (error) {
     lock.close();
     if (error.errcode === 5 || error.errcode === 6) throw new Error('此配置目录已有一个桥接进程在运行。');
@@ -21,7 +28,7 @@ export function acquireLock(path) {
 
 export class Store {
   constructor(path) {
-    this.db = new DatabaseSync(path);
+    this.db = openDatabase(path);
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
@@ -76,7 +83,20 @@ export class Store {
       INSERT INTO jobs(id, binding_id, binding_key, original_id, origin_time, forwarded_content)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING
     `).run(id, binding.id, routeKey(binding), message.id, message.sentAt, content);
-    return Number(result.changes);
+    return result.changes === 1 ? id : null;
+  }
+
+  migrateForwardText() {
+    this.transaction(() => {
+      const key = 'original-forward-text';
+      if (this.get(key)) return;
+      this.db.prepare("UPDATE jobs SET forwarded_content = NULL WHERE state = 'queued'").run();
+      this.set(key, true);
+    });
+  }
+
+  saveForwardText(id, content) {
+    this.db.prepare("UPDATE jobs SET forwarded_content = ? WHERE id = ? AND state = 'queued'").run(content, id);
   }
 
   pending(binding, state, now, limit = 30) {
@@ -86,15 +106,32 @@ export class Store {
     `).all(binding.id, routeKey(binding), state, now, limit);
   }
 
-  forwarded(id, raftId, thread) {
-    this.db.prepare(`UPDATE jobs SET state = 'forwarded', raft_id = ?, thread_key = ?, forwarded_content = NULL,
-      attempts = 0, next_attempt = 0, first_attempt = NULL, error = NULL WHERE id = ?`).run(raftId, thread, id);
+  hasRecentForward(binding, since) {
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM jobs
+      JOIN metadata ON metadata.key = 'raft-forwarded-at:' || jobs.id
+      WHERE binding_id = ? AND binding_key = ? AND state = 'forwarded'
+        AND CAST(metadata.value AS INTEGER) >= ?
+      LIMIT 1
+    `).get(binding.id, routeKey(binding), since));
+  }
+
+  forwarded(id, raftId, thread, at) {
+    this.transaction(() => {
+      this.db.prepare(`UPDATE jobs SET state = 'forwarded', raft_id = ?, thread_key = ?, forwarded_content = NULL,
+        attempts = 0, next_attempt = 0, first_attempt = NULL, error = NULL WHERE id = ?`).run(raftId, thread, id);
+      this.set(`raft-forwarded-at:${id}`, at);
+    });
   }
 
   byThread(thread) { return this.db.prepare('SELECT * FROM jobs WHERE thread_key = ?').get(thread); }
 
   prepareReply(id, text) {
     this.db.prepare(`UPDATE jobs SET reply_text = ?, state = 'ready' WHERE id = ? AND state = 'forwarded'`).run(text, id);
+    const key = `raft-forwarded-at:${id}`;
+    const forwardedAt = this.get(key);
+    this.db.prepare('DELETE FROM metadata WHERE key = ?').run(key);
+    return forwardedAt;
   }
 
   attemptedReply(id, now) {

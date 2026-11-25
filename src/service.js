@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { access, constants, mkdir, open, rename, unlink, writeFile } from 'node:fs/promises';
+import { access, constants, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-import { hash } from './store.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { ensureDirectory } from './config.js';
+import { acquireLock, hash } from './store.js';
 
 function xml(value) {
   return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -30,9 +32,49 @@ async function serviceEnvironment(config, env, ...extraPaths) {
   return environment;
 }
 
-export function launchAgentPlist({ label, node, entry, home, log, environment }) {
+async function readDefinition(path) {
+  try { return await readFile(path, 'utf8'); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return null;
+  }
+}
+
+async function writeDefinition(path, definition) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, definition, { mode: 0o600, flag: 'wx' });
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
+}
+
+async function rollback(error, restore) {
+  try { await restore(); } catch (failure) {
+    throw new Error(`${error.message}。恢复原服务失败：${failure.message}`, { cause: error });
+  }
+  throw error;
+}
+
+async function restoreDefinition(path, previous) {
+  if (previous === null) await unlink(path);
+  else await writeDefinition(path, previous);
+}
+
+async function prepareLog(files, verifyIdle) {
+  await ensureDirectory(files);
+  if (verifyIdle) {
+    const unlock = acquireLock(files.lock);
+    unlock();
+  }
+  const log = await open(files.log, 'a', 0o600);
+  await log.close();
+}
+
+export function launchAgentPlist({ label, node, entry, home, environment, debug }) {
   const string = (value) => `<string>${xml(value)}</string>`;
-  const argumentsXml = [node, entry, '--data-dir', home, 'run'].map(string).join('');
+  const argumentsXml = [node, entry, '--data-dir', home, 'run', '--managed', ...(debug ? ['--debug'] : [])].map(string).join('');
   const environmentXml = Object.entries(environment).map(([key, value]) => `<key>${xml(key)}</key>${string(value)}`).join('');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -40,18 +82,17 @@ export function launchAgentPlist({ label, node, entry, home, log, environment })
 <key>Label</key>${string(label)}
 <key>ProgramArguments</key><array>${argumentsXml}</array>
 <key>EnvironmentVariables</key><dict>${environmentXml}</dict>
-<key>StandardOutPath</key>${string(log)}
-<key>StandardErrorPath</key>${string(log)}
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
 <key>ThrottleInterval</key><integer>15</integer>
+<key>ExitTimeOut</key><integer>60</integer>
 </dict></plist>
 `;
 }
 
-export async function service(action, files, config, entry) {
+export async function service(action, files, config, entry, debug = false) {
   if (!['install', 'start', 'stop', 'remove'].includes(action)) throw new Error('用法：service install|start|stop|remove');
-  if (process.platform === 'linux') return systemdService(action, files, config, entry);
+  if (process.platform === 'linux') return systemdService(action, files, config, entry, process.env, debug);
   if (process.platform !== 'darwin') throw new Error('后台服务支持 macOS 和使用 systemd 的 Linux。可用 run 前台运行。');
   const label = `local.raft-lark-bridge.${hash([files.home]).slice(0, 12)}`;
   const directory = join(homedir(), 'Library', 'LaunchAgents');
@@ -63,33 +104,60 @@ export async function service(action, files, config, entry) {
     if (!optional && result.status !== 0) throw new Error(result.stderr?.trim() || 'launchctl 操作失败。');
     return result;
   };
+  const isLoaded = () => invoke(['print', target], true).status === 0;
+  const unload = async () => {
+    invoke(['bootout', target]);
+    const deadline = Date.now() + 65_000;
+    while (isLoaded()) {
+      if (Date.now() >= deadline) throw new Error('等待 macOS 后台服务退出超时。');
+      await delay(100);
+    }
+  };
   if (action === 'remove') {
-    invoke(['bootout', target], true);
+    if (isLoaded()) await unload();
     await unlink(plist).catch((error) => { if (error.code !== 'ENOENT') throw error; });
     console.log('已移除 macOS 后台服务，绑定和状态仍保留在本机。');
     return;
   }
   if (action === 'stop') {
-    invoke(['bootout', target]);
+    if (isLoaded()) await unload();
     console.log('后台服务已停止。');
     return;
   }
   if (action === 'start') {
     await access(plist);
-    if (invoke(['print', target], true).status !== 0) invoke(['bootstrap', domain, plist]);
+    if (!isLoaded()) invoke(['bootstrap', domain, plist]);
     else invoke(['kickstart', target]);
     console.log(`后台服务已启动，日志在 ${files.log}`);
     return;
   }
   const environment = await serviceEnvironment(config, process.env);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const log = await open(files.log, 'a', 0o600);
-  await log.close();
-  const definition = launchAgentPlist({ label, node: process.execPath, entry, home: files.home, log: files.log, environment });
-  invoke(['bootout', target], true);
-  await writeFile(plist, definition, { mode: 0o600 });
-  invoke(['bootstrap', domain, plist]);
-  console.log(`后台服务已安装并启动，日志在 ${files.log}`);
+  const definition = launchAgentPlist({ label, node: process.execPath, entry, home: files.home, environment, debug });
+  const existing = await readDefinition(plist);
+  const loaded = isLoaded();
+  await prepareLog(files, !loaded);
+  if (definition !== existing) {
+    await writeDefinition(plist, definition);
+    let unloaded = false;
+    try {
+      if (loaded) {
+        await unload();
+        unloaded = true;
+      }
+      invoke(['bootstrap', domain, plist]);
+    } catch (error) {
+      await rollback(error, async () => {
+        await restoreDefinition(plist, existing);
+        if (unloaded && existing !== null) {
+          if (isLoaded()) await unload();
+          invoke(['bootstrap', domain, plist]);
+        }
+      });
+    }
+  } else if (!loaded) {
+    invoke(['bootstrap', domain, plist]);
+  }
+  console.log(`后台服务已启动，日志在 ${files.log}`);
 }
 
 function systemdQuote(value) {
@@ -97,22 +165,21 @@ function systemdQuote(value) {
     .replaceAll('\n', '\\n').replaceAll('\r', '\\r').replaceAll('\t', '\\t') + '"';
 }
 
-export async function systemdService(action, files, config, entry, env = process.env) {
+export async function systemdService(action, files, config, entry, env = process.env, debug = false) {
   const unit = `raft-lark-bridge-${hash([files.home]).slice(0, 12)}.service`;
   const configHome = isAbsolute(env.XDG_CONFIG_HOME ?? '') ? env.XDG_CONFIG_HOME : join(homedir(), '.config');
   const path = join(configHome, 'systemd', 'user', unit);
+  const systemctl = (args) => spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8', env, timeout: 90_000 });
   const invoke = (...args) => {
-    const result = spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8', env, timeout: 90_000 });
+    const result = systemctl(args);
     if (result.status !== 0) {
       const detail = result.stderr?.trim() || result.error?.message || `退出状态 ${result.status}`;
       throw new Error(`systemctl --user ${args[0]} 失败：${detail}`);
     }
   };
-  const logHint = `journalctl --user -u ${unit}`;
-
   if (action === 'start' || action === 'stop') {
     invoke(action, unit);
-    console.log(action === 'start' ? `后台服务已启动。查看日志：${logHint}` : '后台服务已停止。');
+    console.log(action === 'start' ? `后台服务已启动，日志在 ${files.log}` : '后台服务已停止。');
     return;
   }
   if (action === 'remove') {
@@ -132,7 +199,7 @@ export async function systemdService(action, files, config, entry, env = process
   invoke('show-environment');
   const environment = await serviceEnvironment(config, env, dirname(process.execPath));
   // The colon prefix disables variable substitution so dollar signs in paths stay literal.
-  const command = [`:${process.execPath}`, entry, '--data-dir', files.home, 'run'].map(systemdQuote).join(' ');
+  const command = [`:${process.execPath}`, entry, '--data-dir', files.home, 'run', '--managed', ...(debug ? ['--debug'] : [])].map(systemdQuote).join(' ');
   const assignments = Object.entries(environment).map(([key, value]) => `Environment=${systemdQuote(`${key}=${value}`)}`).join('\n');
   const definition = `[Unit]
 Description=Raft Lark Bridge
@@ -150,16 +217,35 @@ UMask=0077
 [Install]
 WantedBy=default.target
 `;
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, definition, { mode: 0o600, flag: 'wx' });
-    await rename(temporary, path);
-  } finally {
-    await unlink(temporary).catch(() => {});
+  const existing = await readDefinition(path);
+  const wasActive = existing !== null && systemctl(['is-active', '--quiet', unit]).status === 0;
+  await prepareLog(files, !wasActive);
+  const changed = definition !== existing;
+  if (changed) {
+    const wasEnabled = existing !== null && systemctl(['is-enabled', '--quiet', unit]).status === 0;
+    await writeDefinition(path, definition);
+    let enabling = false;
+    let restarting = false;
+    try {
+      invoke('daemon-reload');
+      enabling = true;
+      invoke('enable', unit);
+      restarting = true;
+      invoke('restart', unit);
+    } catch (error) {
+      await rollback(error, async () => {
+        try {
+          if (enabling && !wasEnabled) invoke('disable', ...(existing === null ? ['--now'] : []), unit);
+        } finally {
+          await restoreDefinition(path, existing);
+          invoke('daemon-reload');
+          if (restarting && existing !== null) invoke(wasActive ? 'start' : 'stop', unit);
+        }
+      });
+    }
+  } else {
+    invoke('enable', unit);
+    invoke('start', unit);
   }
-  invoke('daemon-reload');
-  invoke('enable', unit);
-  invoke('restart', unit);
-  console.log(`后台服务已安装并启动。查看日志：${logHint}`);
+  console.log(`后台服务已启动，日志在 ${files.log}`);
 }

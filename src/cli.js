@@ -6,14 +6,18 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { CHAT_ID, HANDLE, MODES, ensureDirectory, findBinding, loadConfig, loadCredential, paths, raftOrigin, readJson, validateConfig, writeJson } from './config.js';
+import { CHAT_ID, DEFAULT_POLL_SECONDS, HANDLE, MODES, ensureDirectory, findBinding, loadConfig, loadCredential, paths, raftOrigin, readJson, validateConfig, writeJson } from './config.js';
 import { makeLark } from './lark.js';
 import { makeRaft } from './raft.js';
-import { bridgeCycle, previewBinding } from './bridge.js';
+import { bridgeCycle, createRaftQueue, previewBinding } from './bridge.js';
 import { acquireLock, Store } from './store.js';
 import { service } from './service.js';
+import { fileLog } from './log.js';
 
 process.umask(0o077);
+let runLog;
+const ACTIVE_REPLY_POLL_MS = 1000;
+const ACTIVE_REPLY_WINDOW_MS = 60_000;
 
 const usage = `Raft ↔ Lark 本地桥接
 
@@ -21,11 +25,12 @@ const usage = `Raft ↔ Lark 本地桥接
   raft-lark-bridge status                  查看绑定、队列和错误
   raft-lark-bridge doctor                  检查两端身份和消息读取
   raft-lark-bridge preview <绑定>           查看匹配预览
-  raft-lark-bridge run [--once]            前台运行，或处理一轮
+  raft-lark-bridge run [--once] [--debug]  前台运行，或处理一轮
   raft-lark-bridge pause <绑定>             暂停绑定
   raft-lark-bridge resume <绑定>            恢复绑定
   raft-lark-bridge unbind <绑定>            解除绑定
   raft-lark-bridge service install|start|stop|remove  管理 macOS / Linux (systemd) 后台服务
+  raft-lark-bridge service install --debug            启用后台调试日志
 
 全局选项  --data-dir <目录>，默认 ~/.raft-lark-bridge
 绑定参数可用名称或 status 显示的 ID。
@@ -114,6 +119,7 @@ async function setup(files) {
     const enteredBinary = previous?.larkBinary ?? ((await ask('lark-cli 路径 [lark-cli]：')) || 'lark-cli');
     const binary = /[/\\]/.test(enteredBinary) ? resolve(enteredBinary) : enteredBinary;
     const lark = makeLark(binary);
+    await lark.requireReplySupport();
     const profiles = await lark.profiles();
     if (!Array.isArray(profiles) || !profiles.length) throw new Error('本机没有 Lark CLI profile，请先完成 lark-cli config init 和 auth login。');
     listOptions(profiles.map((row) => `${row.name} · ${row.user ?? '未登录'} · ${row.brand}`));
@@ -150,7 +156,7 @@ async function setup(files) {
       chatId: chat.id, mode, enabled: true, enabledAt: Date.now() };
     const config = validateConfig({
       version: 1, larkBinary: binary, raft: { url, serverId: context.serverId, bridgeId: context.bridgeId },
-      pollSeconds: previous?.pollSeconds ?? 20, bindings: [...(previous?.bindings ?? []), binding],
+      pollSeconds: previous?.pollSeconds ?? DEFAULT_POLL_SECONDS, bindings: [...(previous?.bindings ?? []), binding],
     });
     console.log('\n4/4  预览并启用');
     console.log(`${MODES[mode]} ${clean(chat.name)} → @${clean(agent.handle)} → 以 ${clean(user.userName)} 身份回复原会话`);
@@ -161,7 +167,7 @@ async function setup(files) {
     binding.enabledAt = Date.now();
     if (!previous) await writeJson(files.credential, { token });
     await writeJson(files.config, config);
-    const start = process.env.npm_lifecycle_event === 'setup' ? 'npm run doctor，然后运行 npm start' : 'raft-lark-bridge doctor，然后运行 raft-lark-bridge run';
+    const start = process.env.npm_lifecycle_event === 'setup' ? 'npm run doctor，然后运行 npm start' : 'raft-lark-bridge doctor，然后运行 raft-lark-bridge service install';
     console.log(`已保存绑定 ${binding.id.slice(0, 8)}。运行 ${start}。`);
   } finally { questions.close(); }
 }
@@ -209,33 +215,72 @@ function status(config, store) {
   if (inbox) console.log(`\nRaft 收件箱  ${new Date(inbox.at).toLocaleString()}  ${inbox.code ?? '正常'}`);
 }
 
-async function run(files, firstConfig, raft, once) {
+async function run(files, firstConfig, raft, { once, debug }) {
   const unlock = acquireLock(files.lock);
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
   let store;
-  try {
-    assertRaftIdentity(firstConfig, await raft.context());
-    store = new Store(files.database);
-    console.log('桥接正在运行。按 Ctrl+C 停止。');
-    do {
+  let replySleep;
+  const orderRaft = createRaftQueue();
+  const log = (event) => {
+    if (event.event === 'raft.forwarded') replySleep?.abort();
+    if (event.level === 'debug' && !debug) return;
+    const line = JSON.stringify(event);
+    if (runLog) runLog(line);
+    else if (event.level === 'error') console.error(line);
+    else console.log(line);
+  };
+  const poll = async (phase) => {
+    while (!controller.signal.aborted) {
+      const cycleStarted = performance.now();
       const config = await loadConfig(files);
       if (JSON.stringify(config.raft) !== JSON.stringify(firstConfig.raft)) throw new Error('Raft 配置已变化，请重启桥接。');
-      const stats = await bridgeCycle({ config, store, raft, lark: makeLark(config.larkBinary), loadCurrentConfig: () => loadConfig(files),
-        stopped: () => controller.signal.aborted,
-        log: ({ stage, binding, code }) => console.error(`${new Date().toISOString()}  ${stage}  ${clean(binding)}  ${code}`),
+      const lark = makeLark(config.larkBinary);
+      if (config.larkBinary !== firstConfig.larkBinary) await lark.requireReplySupport();
+      const stats = await bridgeCycle({ config, store, raft, lark, loadCurrentConfig: () => loadConfig(files),
+        stopped: () => controller.signal.aborted, log, phase, orderRaft,
       });
+      const recent = phase === 'reply' && stats.errors === 0 && hasActiveReplyWait(config, store);
+      const intervalMs = recent ? ACTIVE_REPLY_POLL_MS : config.pollSeconds * 1000;
+      const durationMs = Math.round(performance.now() - cycleStarted);
+      const nextDelayMs = Math.max(0, intervalMs - durationMs);
+      log({ time: new Date().toISOString(), level: 'debug', event: 'bridge.cycle',
+        phase, durationMs, intervalMs, nextDelayMs: once ? null : nextDelayMs, ...stats });
       if (once || Object.values(stats).some(Boolean)) {
         console.log(`本轮入队 ${stats.queued} · 转发 ${stats.forwarded} · 回复 ${stats.replied} · 错误 ${stats.errors}`);
       }
-      if (once) { if (stats.errors) process.exitCode = 1; break; }
-      if (!controller.signal.aborted) await delay(config.pollSeconds * 1000, undefined, { signal: controller.signal }).catch((error) => {
+      if (once) {
+        if (stats.errors) process.exitCode = 1;
+        return;
+      }
+      if (phase === 'reply') replySleep = new AbortController();
+      const signal = phase === 'reply' ? AbortSignal.any([controller.signal, replySleep.signal]) : controller.signal;
+      await delay(nextDelayMs, undefined, { signal }).catch((error) => {
         if (error.name !== 'AbortError') throw error;
       });
-    } while (!controller.signal.aborted);
+      if (phase === 'reply') replySleep = undefined;
+    }
+  };
+  const guardedPoll = async (phase) => {
+    try { await poll(phase); } catch (error) {
+      stop();
+      throw error;
+    }
+  };
+  try {
+    assertRaftIdentity(firstConfig, await raft.context());
+    store = new Store(files.database);
+    store.migrateForwardText();
+    console.log('桥接正在运行。按 Ctrl+C 停止。');
+    log({ time: new Date().toISOString(), level: 'info', event: 'bridge.started', pollSeconds: firstConfig.pollSeconds, debug: Boolean(debug) });
+    if (once) { await poll('both'); return; }
+    const results = await Promise.allSettled([guardedPoll('intake'), guardedPoll('reply')]);
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure) throw failure.reason;
   } finally {
+    if (store) log({ time: new Date().toISOString(), level: 'info', event: 'bridge.stopped' });
     store?.close();
     unlock();
     process.off('SIGINT', stop);
@@ -243,20 +288,33 @@ async function run(files, firstConfig, raft, once) {
   }
 }
 
+function hasActiveReplyWait(config, store) {
+  const since = Date.now() - ACTIVE_REPLY_WINDOW_MS;
+  return config.bindings.some((binding) => binding.enabled && store.hasRecentForward(binding, since));
+}
+
 async function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    'data-dir': { type: 'string' }, once: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+    'data-dir': { type: 'string' }, once: { type: 'boolean' }, debug: { type: 'boolean' }, managed: { type: 'boolean' },
+    help: { type: 'boolean', short: 'h' },
   } });
   const [command, argument, ...extra] = positionals;
   if (!command || values.help || command === 'help') return console.log(usage);
-  if (extra.length || (values.once && command !== 'run')) throw new Error('参数无效。请运行 --help。');
+  if (extra.length || ((values.once || values.managed) && command !== 'run') ||
+      (values.debug && command !== 'run' && !(command === 'service' && argument === 'install'))) {
+    throw new Error('参数无效。请运行 --help。');
+  }
   const files = paths(values['data-dir']);
   if (command === 'setup' && !argument) return setup(files);
   const entry = fileURLToPath(import.meta.url);
   if (command === 'service' && argument !== 'install') return service(argument, files, undefined, entry);
   await ensureDirectory(files);
+  if (values.managed) runLog = fileLog(files.log);
   const config = await loadConfig(files);
-  if (command === 'service') return service(argument, files, config, entry);
+  if (command === 'service') {
+    await makeLark(config.larkBinary).requireReplySupport();
+    return service(argument, files, config, entry, values.debug);
+  }
   if (command === 'status' && !argument) {
     const store = new Store(files.database);
     try { return status(config, store); } finally { store.close(); }
@@ -272,13 +330,15 @@ async function main() {
   const lark = makeLark(config.larkBinary);
   if (command === 'preview' && argument) return showPreview(await previewBinding(lark, findBinding(config, argument)));
   if (!['doctor', 'run'].includes(command) || argument) throw new Error('用法无效。请运行 --help。');
+  await lark.requireReplySupport();
   const raft = makeRaft(config.raft.url, await loadCredential(files));
   if (command === 'doctor') return doctor(config, lark, raft);
-  return run(files, config, raft, values.once);
+  return run(files, config, raft, values);
 }
 
 main().catch((error) => {
   if (error.name === 'AbortError') { process.exitCode = 130; return; }
+  runLog?.(JSON.stringify({ time: new Date().toISOString(), level: 'error', event: 'bridge.failed', message: showError(error) }));
   console.error(showError(error));
   process.exitCode = 1;
 });

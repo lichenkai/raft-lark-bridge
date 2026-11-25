@@ -8,10 +8,14 @@
   "files": ["src", "README.md", "docs/assets/*.svg", "skills/raft-lark-bridge/SKILL.md"],
   "engines": { "node": ">=22.13.0" },
   "scripts": {
+    "preflight": "node src/preflight.js",
+    "presetup": "node src/preflight.js --node-only",
     "setup": "node src/cli.js setup",
     "doctor": "node src/cli.js doctor",
     "status": "node src/cli.js status",
-    "start": "node src/cli.js run",
+    "start": "node src/cli.js service install",
+    "stop": "node src/cli.js service stop",
+    "foreground": "node src/cli.js run",
     "bridge": "node src/cli.js",
     "test": "node --test"
   },

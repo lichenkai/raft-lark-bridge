@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 export const MODES = { dm: '指定单聊', group: '指定群聊', mention: '指定群聊 @我' };
+export const DEFAULT_POLL_SECONDS = 3;
 export const CHAT_ID = /^oc_[\w-]+$/;
 export const USER_ID = /^ou_[\w-]+$/;
 export const MESSAGE_ID = /^om_[\w-]+$/;
@@ -74,7 +75,7 @@ export function validateConfig(config) {
       !config.raft || raftOrigin(config.raft.url) !== config.raft.url ||
       typeof config.raft.serverId !== 'string' || !config.raft.serverId ||
       typeof config.raft.bridgeId !== 'string' || !config.raft.bridgeId ||
-      !Number.isSafeInteger(config.pollSeconds) || config.pollSeconds < 5 || config.pollSeconds > 3600 ||
+      !Number.isSafeInteger(config.pollSeconds) || config.pollSeconds < 3 || config.pollSeconds > 3600 ||
       !Array.isArray(config.bindings) || !config.bindings.every(validBinding)) {
     throw new Error('桥接配置不完整或包含无效字段。请运行 setup 检查。');
   }
