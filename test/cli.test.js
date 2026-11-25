@@ -14,7 +14,7 @@ const exec = promisify(execFile);
 const entry = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const preflight = fileURLToPath(new URL('../src/preflight.js', import.meta.url));
 
-test('CLI help and setup do not load SQLite', { skip: process.platform === 'win32' }, async (t) => {
+test('CLI help and a setup without a terminal do not load SQLite', { skip: process.platform === 'win32' }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'raft-lark-setup-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const help = await exec(process.execPath, [entry, 'help']);
@@ -31,7 +31,8 @@ test('CLI help and setup do not load SQLite', { skip: process.platform === 'win3
 test('the CLI runs a simulated Lark executable and a Raft HTTP service end to end', { skip: process.platform === 'win32' }, async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'raft-lark-cli-'));
   const binary = join(home, 'lark-cli');
-  const eventTime = new Date(Date.now() - 6000).toISOString().slice(0, 16).replace('T', ' ');
+  const originalTime = String(Date.now() - 6000);
+  const eventTime = new Date(Number(originalTime)).toISOString().slice(0, 16).replace('T', ' ');
   const originalText = '  @测试账号 需要帮助\r\n#项目  ';
   const rawText = '  @_user_1 需要帮助\r\n#项目  ';
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -49,7 +50,7 @@ else if (args.includes('status')) out({ appId: 'cli_app', brand: 'feishu', ident
 else if (args.includes('/open-apis/im/v1/messages/om_first')) out({ items: [{
   message_id: 'om_first', chat_id: 'oc_group', sender: { id: 'ou_colleague', sender_type: 'user' },
   body: { content: JSON.stringify({ text: ${JSON.stringify(rawText)} }) },
-  create_time: ${JSON.stringify(eventTime)}, msg_type: 'text', mentions: [{ key: '@_user_1', id: { open_id: 'ou_me' }, name: '测试账号' }],
+  create_time: ${JSON.stringify(originalTime)}, msg_type: 'text', mentions: [{ key: '@_user_1', id: { open_id: 'ou_me' }, name: '测试账号' }],
 }] });
 else if (args.includes('+messages-search')) out({ has_more: false, messages: [{
   message_id: 'om_first', chat_id: 'oc_group', sender: { id: 'ou_colleague', sender_type: 'user' },

@@ -47,6 +47,7 @@ To change a binding's mode, identify its profile, chat ID, target Agent, and des
 ## Verify and troubleshoot
 
 - `npm run doctor` checks identity and reading. A preview can be empty even when the binding is valid.
+- For `LARK_CHAT_TYPE_MISMATCH`, verify that the chat ID belongs to the configured direct or group chat. For `LARK_CHAT_TYPE_UNVERIFIED`, confirm the ID, test with a fresh text message in the agreed chat, and rerun `doctor`. Legacy bindings wait for chat type verification before resuming pending sends.
 - Use `npm start debug` for foreground diagnostics with live terminal output and a copy in `bridge.log`. It stops a running background service for the same data directory. Press Ctrl+C to stop, then run `npm start` to return to the background. For background debug logging, use `node src/cli.js service install --debug`.
 - For a live test, use an agreed chat and a new plain-text message from a different Lark account. Under `指定群聊 @我`, that message must actually mention the bound account. Raft receives the target Agent's handle in place of that mention. The bridge sends the Agent's first text reply from the corresponding thread back to the original Lark message. Verify the chat, in-reply-to message, body, and sender. `node src/cli.js run --once` can process active bindings and send messages. Use it with an explicit request for a live run.
 - For `LARK_IDENTITY_CHANGED`, check the profile and the signed-in user before resuming. For a reply marked for review, check the original Lark conversation before any manual resend.

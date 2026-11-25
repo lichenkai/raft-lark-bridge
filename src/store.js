@@ -16,11 +16,11 @@ export function routeKey(binding) {
   return hash([binding.id, binding.profile, binding.appId, binding.userId, binding.brand, binding.agentId, binding.agentHandle, binding.chatId, binding.mode]);
 }
 
-export function acquireLock(path) {
+export function acquireLock(path, busyMessage = '此配置目录已有一个桥接进程在运行。') {
   const lock = openDatabase(path);
   try { lock.exec('BEGIN EXCLUSIVE'); } catch (error) {
     lock.close();
-    if (error.errcode === 5 || error.errcode === 6) throw new Error('此配置目录已有一个桥接进程在运行。');
+    if (error.errcode === 5 || error.errcode === 6) throw new Error(busyMessage);
     throw error;
   }
   return () => lock.close();
@@ -51,6 +51,15 @@ export class Store {
         error TEXT
       );
       CREATE INDEX IF NOT EXISTS jobs_pending ON jobs(binding_id, state, next_attempt, origin_time);
+      CREATE INDEX IF NOT EXISTS jobs_lark_reply ON jobs(lark_reply_id);
+      CREATE TABLE IF NOT EXISTS pending_raft_replies (
+        thread TEXT NOT NULL,
+        sender_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        published_at TEXT,
+        PRIMARY KEY (thread, sender_id)
+      );
     `);
   }
 
@@ -116,15 +125,47 @@ export class Store {
     `).get(binding.id, routeKey(binding), since));
   }
 
-  forwarded(id, raftId, thread, at) {
-    this.transaction(() => {
+  forwarded(id, raftId, thread, at, senderId) {
+    return this.transaction(() => {
       this.db.prepare(`UPDATE jobs SET state = 'forwarded', raft_id = ?, thread_key = ?, forwarded_content = NULL,
         attempts = 0, next_attempt = 0, first_attempt = NULL, error = NULL WHERE id = ?`).run(raftId, thread, id);
       this.set(`raft-forwarded-at:${id}`, at);
+      const reply = this.db.prepare('SELECT * FROM pending_raft_replies WHERE thread = ? AND sender_id = ?').get(thread, senderId);
+      if (reply) {
+        this.prepareReply(id, reply.text);
+        this.db.prepare('DELETE FROM pending_raft_replies WHERE thread = ?').run(thread);
+      }
+      return reply;
     });
   }
 
+  hasUnconfirmedForward(binding) {
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM jobs WHERE binding_id = ? AND binding_key = ? AND state = 'queued'
+        AND (first_attempt IS NOT NULL OR attempts > 0) LIMIT 1
+    `).get(binding.id, routeKey(binding)));
+  }
+
+  saveEarlyReply(reply, at, timestamp) {
+    this.db.prepare(`
+      INSERT INTO pending_raft_replies(thread, sender_id, text, observed_at, published_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
+    `).run(reply.thread, reply.senderId, reply.text, at, typeof timestamp === 'string' ? timestamp : null);
+  }
+
+  clearEarlyReplies() {
+    this.db.prepare('DELETE FROM pending_raft_replies').run();
+  }
+
   byThread(thread) { return this.db.prepare('SELECT * FROM jobs WHERE thread_key = ?').get(thread); }
+
+  isBridgeReply(id) {
+    return Boolean(this.db.prepare('SELECT 1 FROM jobs WHERE lark_reply_id = ? LIMIT 1').get(id));
+  }
+
+  skipBridgeReply(id) {
+    this.db.prepare("DELETE FROM jobs WHERE id = ? AND state = 'queued'").run(id);
+  }
 
   prepareReply(id, text) {
     this.db.prepare(`UPDATE jobs SET reply_text = ?, state = 'ready' WHERE id = ? AND state = 'forwarded'`).run(text, id);
@@ -134,7 +175,7 @@ export class Store {
     return forwardedAt;
   }
 
-  attemptedReply(id, now) {
+  attempted(id, now) {
     this.db.prepare('UPDATE jobs SET first_attempt = COALESCE(first_attempt, ?) WHERE id = ?').run(now, id);
   }
 

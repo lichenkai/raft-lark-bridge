@@ -6,10 +6,10 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { CHAT_ID, DEFAULT_POLL_SECONDS, HANDLE, MODES, ensureDirectory, findBinding, loadConfig, loadCredential, paths, raftOrigin, readJson, validateConfig, writeJson } from './config.js';
+import { CHAT_ID, DEFAULT_POLL_SECONDS, HANDLE, MODES, ensureDirectory, findBinding, loadConfig, loadCredential, paths, raftOrigin, readJson, saveBinding, updateConfig, validateConfig } from './config.js';
 import { makeLark } from './lark.js';
 import { makeRaft } from './raft.js';
-import { bridgeCycle, createRaftQueue, previewBinding } from './bridge.js';
+import { bridgeCycle, createTaskQueue, previewBinding } from './bridge.js';
 import { acquireLock, Store } from './store.js';
 import { service } from './service.js';
 import { fileLog } from './log.js';
@@ -118,10 +118,22 @@ async function setup(files) {
     console.log('\nRaft Lark Bridge · 绑定配置');
     console.log('配置会在你确认后保存。按 Ctrl+C 可随时退出。');
     console.log('\n1/4  选择飞书账号');
-    const enteredBinary = previous?.larkBinary ?? ((await ask('lark-cli 路径 [lark-cli]：')) || 'lark-cli');
-    const binary = /[/\\]/.test(enteredBinary) ? resolve(enteredBinary) : enteredBinary;
-    const lark = makeLark(binary);
-    await lark.requireReplySupport();
+    const defaultBinary = previous?.larkBinary ?? 'lark-cli';
+    let binary = previous?.larkBinary;
+    let lark = binary && makeLark(binary);
+    if (lark) {
+      try { await lark.requireReplySupport(); } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        console.log(showError(error));
+        lark = null;
+      }
+    }
+    if (!lark) {
+      const enteredBinary = (await ask(`lark-cli 路径 [${clean(defaultBinary)}]：`)) || defaultBinary;
+      binary = /[/\\]/.test(enteredBinary) ? resolve(enteredBinary) : enteredBinary;
+      lark = makeLark(binary);
+      await lark.requireReplySupport();
+    }
     const profiles = await lark.profiles();
     if (!Array.isArray(profiles) || !profiles.length) throw new Error('本机没有 Lark CLI profile，请先完成 lark-cli config init 和 auth login。');
     listOptions(profiles.map((row) => `${row.name} · ${row.user ?? '未登录'} · ${row.brand}`));
@@ -163,12 +175,12 @@ async function setup(files) {
     console.log('\n4/4  预览并启用');
     console.log(`${MODES[mode]} ${clean(chat.name)} → @${clean(agent.handle)} → 以 ${clean(user.userName)} 身份回复原会话`);
     showPreview(await previewBinding(lark, binding));
+    binding.chatVerified = true;
     if (!/^(y|yes|是)$/i.test(await ask('保存并启用自动转发与本人身份回复？[y/N]：'))) {
       return console.log('未保存。');
     }
     binding.enabledAt = Date.now();
-    if (!previous) await writeJson(files.credential, { token });
-    await writeJson(files.config, config);
+    await saveBinding(files, config, binding, previous ? undefined : token, previous?.larkBinary);
     const start = process.env.npm_lifecycle_event === 'setup' ? 'npm run doctor，然后运行 npm start' : 'raft-lark-bridge doctor，然后运行 raft-lark-bridge service install';
     console.log(`已保存绑定 ${binding.id.slice(0, 8)}。运行 ${start}。`);
   } finally { questions.close(); }
@@ -217,10 +229,17 @@ function status(config, store) {
   if (inbox) console.log(`\nRaft 收件箱  ${new Date(inbox.at).toLocaleString()}  ${inbox.code ?? '正常'}`);
 }
 
-async function unbind(files, config, binding) {
-  config.bindings = config.bindings.filter((row) => row.id !== binding.id);
-  await writeJson(files.config, config);
-  console.log(`${clean(binding.name)}  已解除绑定`);
+async function editBinding(files, query, action) {
+  let binding;
+  await updateConfig(files, (config) => {
+    if (!config) throw new Error('还没有配置。请先运行 setup。');
+    binding = findBinding(config, query);
+    if (action === 'unbind') config.bindings = config.bindings.filter((row) => row.id !== binding.id);
+    else binding.enabled = action === 'resume';
+    return config;
+  });
+  const outcome = { unbind: '已解除绑定', resume: '已恢复', pause: '已暂停' };
+  console.log(`${clean(binding.name)}  ${outcome[action]}`);
 }
 
 async function clearBinding(files, config) {
@@ -231,10 +250,7 @@ async function clearBinding(files, config) {
     const selected = await selectOption(questions.ask, '选择要删除的绑定编号：', config.bindings);
     const confirmation = await questions.ask(`删除「${clean(selected.name)}」并停止该会话的自动转发和回信？[y/N]：`);
     if (!/^(y|yes|是)$/i.test(confirmation)) return console.log('未删除任何绑定。');
-    const current = await loadConfig(files);
-    const binding = current.bindings.find((row) => row.id === selected.id);
-    if (!binding) throw new Error('该绑定已不存在。');
-    return unbind(files, current, binding);
+    return editBinding(files, selected.id, 'unbind');
   } finally {
     questions.close();
   }
@@ -256,7 +272,14 @@ async function run(files, firstConfig, raft, { once, debug, managed, foregroundD
   process.on('SIGTERM', stop);
   let store;
   let replySleep;
-  const orderRaft = createRaftQueue();
+  const orderRaft = createTaskQueue();
+  const larkWrites = new Map();
+  const orderLark = (binding, action) => {
+    const key = `${binding.brand}:${binding.chatId}`;
+    let queue = larkWrites.get(key);
+    if (!queue) larkWrites.set(key, queue = createTaskQueue());
+    return queue(action);
+  };
   const log = (event) => {
     if (event.event === 'raft.forwarded') replySleep?.abort();
     if (event.level === 'debug' && !debug) return;
@@ -274,7 +297,7 @@ async function run(files, firstConfig, raft, { once, debug, managed, foregroundD
       const lark = makeLark(config.larkBinary);
       if (config.larkBinary !== firstConfig.larkBinary) await lark.requireReplySupport();
       const stats = await bridgeCycle({ config, store, raft, lark, loadCurrentConfig: () => loadConfig(files),
-        stopped: () => controller.signal.aborted, log, phase, orderRaft,
+        stopped: () => controller.signal.aborted, log, phase, orderRaft, orderLark,
       });
       const recent = phase === 'reply' && stats.errors === 0 && hasActiveReplyWait(config, store);
       const intervalMs = recent ? ACTIVE_REPLY_POLL_MS : config.pollSeconds * 1000;
@@ -359,14 +382,7 @@ async function main() {
     try { return status(config, store); } finally { store.close(); }
   }
   if (command === 'clear' && !argument) return clearBinding(files, config);
-  if (['pause', 'resume', 'unbind'].includes(command) && argument) {
-    const binding = findBinding(config, argument);
-    if (command === 'unbind') return unbind(files, config, binding);
-    binding.enabled = command === 'resume';
-    await writeJson(files.config, config);
-    console.log(`${clean(binding.name)}  ${binding.enabled ? '已恢复' : '已暂停'}`);
-    return;
-  }
+  if (['pause', 'resume', 'unbind'].includes(command) && argument) return editBinding(files, argument, command);
   const lark = makeLark(config.larkBinary);
   if (command === 'preview' && argument) return showPreview(await previewBinding(lark, findBinding(config, argument)));
   if ((!foregroundDebug && !['doctor', 'run'].includes(command)) || argument) throw new Error('用法无效。请运行 --help。');

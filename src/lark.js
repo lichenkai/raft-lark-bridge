@@ -47,9 +47,12 @@ export function runLark(binary, args, input, timeoutMs = 45_000) {
       const code = errorCode(error.code) || 'LARK_START';
       reject(new BridgeError(code === 'ENOENT' ? '找不到 lark-cli。请安装它，或在 setup 输入可执行文件绝对路径。' : '无法启动 lark-cli。', code));
     });
-    child.once('close', (status) => {
+    child.once('close', (status, signal) => {
       clearTimeout(timer);
       if (fault) return reject(fault);
+      if (signal) {
+        return reject(new BridgeError('Lark CLI 调用被信号中断。', `LARK_SIGNAL_${signal}`, signal === 'SIGINT' || signal === 'SIGTERM'));
+      }
       if (status === 0 && args.length === 1 && args[0] === '--version') return resolve(stdout.trim());
       const output = parseOutput(stdout);
       if (status === 0 && output && output.ok !== false) return resolve(output.data ?? output);
@@ -109,10 +112,26 @@ function historyMessage(row, binding) {
 function searchMessage(row, binding) {
   const message = normalizeMessage(row);
   if (!message) return null;
-  const hasBoundMention = Array.isArray(row.mentions)
-    ? row.mentions.some((entry) => mentionsBoundUser(entry, binding)) : binding.mode === 'mention';
+  const hasMentions = Array.isArray(row.mentions);
+  const hasBoundMention = hasMentions && row.mentions.some((entry) => mentionsBoundUser(entry, binding));
+  if (binding.mode === 'mention' && hasMentions && !hasBoundMention) return null;
+  const minutePrecision = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(row.create_time);
+  if (!minutePrecision && message.sentAt < binding.enabledAt) {
+    // Preview can show older texts. The intake uses the exact timestamp below.
+    return { ...message, exactTime: true };
+  }
+  const activationMinute = minutePrecision && message.sentAt < binding.enabledAt &&
+    message.sentAt + 60_000 > binding.enabledAt;
   // Search has rendered the mention labels already, so it cannot distinguish identical names in the text.
-  return hasBoundMention ? { ...message, needsOriginal: true } : message;
+  return hasBoundMention || binding.mode === 'mention' || activationMinute ? { ...message, needsOriginal: true } : message;
+}
+
+export function checkChatMode(binding, mode) {
+  if (!['p2p', 'group', 'topic'].includes(mode)) return false;
+  if ((binding.mode === 'dm') !== (mode === 'p2p')) {
+    throw new BridgeError('会话类型与绑定规则不同。请按实际会话选择单聊或群聊。', 'LARK_CHAT_TYPE_MISMATCH');
+  }
+  return true;
 }
 
 export function makeLark(binary, call = runLark) {
@@ -152,6 +171,10 @@ export function makeLark(binary, call = runLark) {
       }
       return Array.from(conversations, ([id, name]) => ({ id, name }));
     },
+    async chatMode(binding) {
+      const data = await invoke(binding.profile, ['api', 'GET', `/open-apis/im/v1/chats/${binding.chatId}`, '--as', 'user'], undefined, 2500);
+      return data.chat_mode;
+    },
     async history(binding, start, end) {
       const data = await invoke(binding.profile, ['api', 'GET', '/open-apis/im/v1/messages', '--as', 'user',
         '--params', JSON.stringify({
@@ -178,14 +201,18 @@ export function makeLark(binary, call = runLark) {
       if (typeof data.has_more !== 'boolean' || (data.has_more && (typeof data.page_token !== 'string' || !data.page_token))) {
         throw new BridgeError('Lark 搜索分页结果不完整。', 'LARK_BAD_PAGE');
       }
-      return { messages: rows.map((row) => searchMessage(row, binding)).filter(Boolean), next: data.has_more ? data.page_token : null };
+      const chatRows = rows.filter((row) => row?.chat_id === binding.chatId);
+      for (const row of chatRows) checkChatMode(binding, row.chat_mode ?? row.chat_type);
+      return { messages: chatRows.map((row) => searchMessage(row, binding)).filter(Boolean), next: data.has_more ? data.page_token : null,
+        ...(chatRows.length ? { chatVerified: true } : {}) };
     },
     async original(binding, id, { forForward = false } = {}) {
       if (!MESSAGE_ID.test(id)) throw new BridgeError('原始飞书消息 ID 无效。', 'LARK_INVALID_MESSAGE_ID');
       const data = await invoke(binding.profile, ['api', 'GET', `/open-apis/im/v1/messages/${id}`, '--as', 'user']);
       const row = Array.isArray(data.items) ? data.items.find((item) => item?.message_id === id) : null;
       const message = historyMessage(row, binding);
-      if (!message || message.chatId !== binding.chatId || message.senderId === binding.userId) {
+      if (!message || message.chatId !== binding.chatId || message.senderId === binding.userId ||
+          (forForward && message.sentAt < binding.enabledAt)) {
         throw new BridgeError('无法核实原始飞书消息。', 'LARK_ORIGINAL_UNAVAILABLE');
       }
       return forForward ? message.forwardContent ?? message.content : message.content;

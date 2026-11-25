@@ -181,7 +181,11 @@ export async function systemdService(action, files, config, entry, env = process
     }
   };
   if (action === 'stop-if-running') {
-    if (systemctl(['is-active', '--quiet', unit]).status === 0) {
+    const status = systemctl(['is-active', unit]);
+    const state = status.stdout?.trim();
+    const managerUnavailable = !state && (status.error || status.stderr?.trim());
+    if (status.status === 0 || ['activating', 'reloading', 'deactivating'].includes(state) ||
+        (managerUnavailable && await readDefinition(path) !== null)) {
       invoke('stop', unit);
       console.log('后台服务已停止。');
     }

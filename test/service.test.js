@@ -23,6 +23,9 @@ fs.appendFileSync(process.env.TEST_CALLS, JSON.stringify(args) + '\\n');
 if (args.includes(process.env.TEST_FAIL_COMMAND)) {
   console.error('mock systemctl failure');
   process.exitCode = 1;
+} else if (args.includes('is-active') && process.env.TEST_ACTIVE_STATE) {
+  console.log(process.env.TEST_ACTIVE_STATE);
+  process.exitCode = 3;
 }
 `, { mode: 0o700 });
   await writeFile(join(directory, 'lark-cli'), '', { mode: 0o700 });
@@ -89,15 +92,19 @@ test('systemd reports an unavailable user manager before attempting installation
   assert.deepEqual(await readCalls(), [['--user', 'show-environment']]);
 });
 
-test('foreground debug stops an active systemd bridge and skips an inactive one', async (t) => {
+test('foreground debug cancels a pending systemd restart and skips an inactive bridge', async (t) => {
   const { env, run, readCalls } = await fixture(t);
   await run('stop-if-running');
-  env.TEST_FAIL_COMMAND = 'is-active';
+  env.TEST_ACTIVE_STATE = 'activating';
+  await run('stop-if-running');
+  env.TEST_ACTIVE_STATE = 'inactive';
   await run('stop-if-running');
   const calls = await readCalls();
-  const unit = calls[0][3];
+  const unit = calls[0][2];
   assert.deepEqual(calls, [
-    ['--user', 'is-active', '--quiet', unit], ['--user', 'stop', unit], ['--user', 'is-active', '--quiet', unit],
+    ['--user', 'is-active', unit], ['--user', 'stop', unit],
+    ['--user', 'is-active', unit], ['--user', 'stop', unit],
+    ['--user', 'is-active', unit],
   ]);
 });
 

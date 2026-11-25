@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { isBuiltin } from 'node:module';
 import { parseArgs } from 'node:util';
@@ -29,8 +28,13 @@ async function preflight() {
 
   const dependency = '@botiverse/raft-sdk';
   const expected = manifest.dependencies[dependency];
-  const installed = spawnSync('npm', ['ls', dependency, '--depth=0', '--json'], { cwd: project, encoding: 'utf8', timeout: 5000 });
-  const sdk = installed.status === 0 ? JSON.parse(installed.stdout).dependencies?.[dependency] : null;
+  let sdk;
+  try {
+    const manifestUrl = import.meta.resolve(`${dependency}/package.json`);
+    sdk = await readJson(new URL(manifestUrl), null);
+  } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
+  }
   if (sdk?.version === expected) console.log(`Raft SDK ${sdk.version} · 与项目锁定版本一致`);
   else problem(`Raft SDK 需要 ${expected}。请在项目目录运行 npm ci。`);
 
@@ -40,7 +44,7 @@ async function preflight() {
   try {
     console.log(await lark.requireReplySupport());
   } catch (error) {
-    problem(error.code === 'LARK_START'
+    problem(error.code === 'ENOENT'
       ? '未找到可用的 lark-cli。初次安装请运行 npx @larksuite/cli@latest install，或用 --lark-cli 指定已安装的路径。'
       : error.message);
     return;

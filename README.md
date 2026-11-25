@@ -132,8 +132,8 @@ tail -F ~/.raft-lark-bridge/bridge.log
 
 ## 消息投递与数据
 
-- **收消息。** 默认每 3 秒开始一轮，同一时间只跑一轮。桥接使用 Lark 用户身份读取绑定会话最近的历史，同时约每 15 秒用搜索补漏，包括会话历史接口未返回的线程回复。撞上新的历史命中时，定时搜索最多让出一个轮询周期。历史结果还有下一页时立即补搜。历史读取失败时，每轮用搜索接续，并在一分钟后重试历史。两种来源共用消息 ID 去重，搜索保留重叠窗口和可恢复的游标。
-- **回复和重试。** 同一进程独立检查 Raft 收件箱。转发成功后立即触发检查，等待答复的前 60 秒以 1 秒为目标间隔，其余情况使用配置的轮询间隔。桥接先把回复保存到 SQLite，再推进 Raft 收件箱游标。重试会复用幂等键。标记为「待核对」的回复，需要先检查 Raft 线程和飞书原会话，再手动补发。
+- **收消息。** 默认每 3 秒开始一轮，同一时间只跑一轮。确认会话类型后，桥接使用 Lark 用户身份读取最近的历史，同时约每 15 秒用搜索补漏，包括会话历史接口未返回的线程回复。撞上新的历史命中时，定时搜索最多让出一个轮询周期。历史结果还有下一页时立即补搜。历史读取失败时，每轮用搜索接续，并在一分钟后重试历史。两种来源共用消息 ID 去重，搜索可跨轮询和重启接着翻页。
+- **回复和重试。** 同一进程独立检查 Raft 收件箱。转发成功后立即触发检查，等待答复的前 60 秒以 1 秒为目标间隔，其余情况使用配置的轮询间隔。桥接先把回复保存到 SQLite，再推进 Raft 收件箱游标。转发回执延迟时，先保存符合条件的答复，等回执确认线程后回传。重试会复用幂等键。标记为「待核对」的回复，需要先检查 Raft 线程和飞书原会话，再手动补发。
 - **身份和可见范围。** 每条绑定都会在发送前核对飞书应用和登录用户。Lark 凭证由 `lark-cli` 管理，Raft 桥接凭证保存在本机仅当前用户可读的文件中。命中的消息会进入 Raft 私聊，参与的 Agent、其创建者以及服务器所有者或管理员可以查看。 [Raft 私聊可见性](https://docs.raft.build/features/messaging/channels/)
 
 ## 常见问题
@@ -144,6 +144,7 @@ tail -F ~/.raft-lark-bridge/bridge.log
 | `status` 或前台运行显示 SQLite `ExperimentalWarning` | 部分 Node.js 版本在打开 SQLite 时会打印提示。命令结果和桥接错误仍会正常输出。 |
 | 向导找不到 `lark-cli` 或已登录账号 | 在运行桥接的同一个系统账号下执行 `lark-cli profile list`。向导也接受 `lark-cli` 的绝对路径。 |
 | 预览为空 | 检查选的是哪个 profile、会话和规则。用另一个账号发纯文本测试。如果选了 `@我`，发信人要明确 @ 绑定的账号。 |
+| `LARK_CHAT_TYPE_MISMATCH` 或 `LARK_CHAT_TYPE_UNVERIFIED` | 确认 `oc_…` 属于所选的单聊或群聊。类型暂无法核实，可以先在该会话发一条测试文本，再运行 `doctor`。 |
 | Raft 收到了消息，飞书没有回复 | 检查文本答复是否由绑定的 Agent 发在原转发消息的线程里。再用 `status` 查看回信阶段错误。 |
 | `LARK_USER_AUTH` 或 `LARK_IDENTITY_CHANGED` | 检查原 profile 是否仍用同一个用户授权。如果要改用新账号，解除旧绑定后重新运行 `setup`。 |
 | `LARK_DETAILS_UNAVAILABLE` 或「待核对」 | 前者表示搜索未拿到消息详情，请检查应用的消息读取权限。待核对的回信需要先查看原会话是否已经收到，再决定是否手动补发。 |
@@ -284,8 +285,8 @@ Follow a `job` across `lark.detected`, `raft.forwarded`, `raft.reply_observed`, 
 
 ### Delivery and data
 
-- **Incoming messages.** The bridge starts a cycle every 3 seconds by default, with one cycle running at a time. It reads recent chat history as the authorized Lark user and runs a catch-up search about every 15 seconds, including for thread replies omitted from chat history. A fresh history match can defer the scheduled search by up to one polling interval. A truncated history page triggers an immediate search. If chat history is unavailable, each cycle uses search and retries chat history after one minute. Both sources deduplicate by message ID, and search keeps overlapping windows and a resumable cursor.
-- **Replies and retries.** The same process checks the Raft inbox on its own schedule. A successful forward triggers a check, then the bridge targets one check per second for the first 60 seconds while waiting for a reply. It uses the configured interval otherwise. Replies are saved in SQLite before the Raft inbox cursor advances. Retries reuse the same idempotency key. A reply marked for review needs a manual check in the Raft thread and the original Lark chat before you resend it.
+- **Incoming messages.** The bridge starts a cycle every 3 seconds by default, with one cycle running at a time. Once it verifies the chat type, it reads recent history as the authorized Lark user and runs a catch-up search about every 15 seconds, including for thread replies omitted from history. A fresh history match can defer the scheduled search by up to one polling interval. A truncated history page triggers an immediate search. If chat history is unavailable, each cycle uses search and retries chat history after one minute. Both sources deduplicate by message ID, and search continues across cycles and restarts.
+- **Replies and retries.** The same process checks the Raft inbox on its own schedule. A successful forward triggers a check, then the bridge targets one check per second for the first 60 seconds while waiting for a reply. It uses the configured interval otherwise. Replies are saved in SQLite before the Raft inbox cursor advances. When a forward receipt is delayed, the bridge keeps the eligible reply and delivers it once the receipt confirms the thread. Retries reuse the same idempotency key. A reply marked for review needs a manual check in the Raft thread and the original Lark chat before you resend it.
 - **Identity and visibility.** Each binding checks the selected Lark application and user before sending. Lark credentials stay managed by `lark-cli`, and the Raft bridge credential is stored locally with user-only permissions. Matching messages enter a Raft DM that the participating agents, their creators, and server owners or admins can access. [Raft DM visibility](https://docs.raft.build/features/messaging/channels/)
 
 ### Troubleshooting
@@ -296,6 +297,7 @@ Follow a `job` across `lark.detected`, `raft.forwarded`, `raft.reply_observed`, 
 | `status` or the foreground runner prints a SQLite `ExperimentalWarning` | Some Node.js versions print this notice when opening SQLite. Command output and bridge errors are still shown. |
 | Setup cannot find `lark-cli` or a signed-in profile | Run `lark-cli profile list` under the OS account that runs the bridge. Setup also accepts an absolute path to `lark-cli`. |
 | The preview is empty | Check the selected profile, chat, and rule. Send a fresh plain-text message from another account and @mention the bound account if the rule requires it. |
+| `LARK_CHAT_TYPE_MISMATCH` or `LARK_CHAT_TYPE_UNVERIFIED` | Check that the `oc_…` ID belongs to the selected direct or group chat. If the type could not be verified, send a test message in the chat and run `doctor` again. |
 | Raft received the message, but Lark has no reply | Check that the bound agent posted a text reply in the forwarded message's thread. Then use `status` to see reply errors. |
 | `LARK_USER_AUTH` or `LARK_IDENTITY_CHANGED` | Check whether the original profile is still authorized for the same user. To switch accounts, unbind and run `setup` again. |
 | `LARK_DETAILS_UNAVAILABLE` or a reply needs review | The former means search did not return message details. Check the app's read permissions. For a reply that needs review, check the original chat before deciding whether to resend it manually. |

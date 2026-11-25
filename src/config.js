@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promis
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { acquireLock } from './store.js';
 
 export const MODES = { dm: '指定单聊', group: '指定群聊', mention: '指定群聊 @我' };
 export const DEFAULT_POLL_SECONDS = 3;
@@ -18,6 +19,7 @@ export function paths(directory = process.env.RAFT_LARK_BRIDGE_HOME) {
     credential: join(home, 'raft-credential.json'),
     database: join(home, 'bridge.sqlite'),
     lock: join(home, 'run-lock.sqlite'),
+    configLock: join(home, 'config-lock.sqlite'),
     log: join(home, 'bridge.log'),
   };
 }
@@ -67,6 +69,7 @@ function validBinding(binding) {
     USER_ID.test(binding.userId) && ['lark', 'feishu'].includes(binding.brand) &&
     typeof binding.agentId === 'string' && binding.agentId.length > 0 && HANDLE.test(binding.agentHandle) &&
     CHAT_ID.test(binding.chatId) && Object.hasOwn(MODES, binding.mode) &&
+    (binding.chatVerified === undefined || typeof binding.chatVerified === 'boolean') &&
     Number.isSafeInteger(binding.enabledAt) && binding.enabledAt > 0 && typeof binding.enabled === 'boolean';
 }
 
@@ -96,6 +99,31 @@ export async function loadConfig(files) {
   const config = await readJson(files.config, null);
   if (!config) throw new Error('还没有配置。请先运行 setup。');
   return validateConfig(config);
+}
+
+export async function updateConfig(files, edit) {
+  const unlock = acquireLock(files.configLock, '另一条命令正在保存桥接配置，请稍后重试。');
+  try {
+    const current = await readJson(files.config, null);
+    if (current) validateConfig(current);
+    const next = validateConfig(await edit(current));
+    await writeJson(files.config, next);
+    return next;
+  } finally {
+    unlock();
+  }
+}
+
+export async function saveBinding(files, preview, binding, newCredential, previousBinary = preview.larkBinary) {
+  return updateConfig(files, async (current) => {
+    if ((!current && !newCredential) || (current && (newCredential || current.larkBinary !== previousBinary ||
+        ['url', 'serverId', 'bridgeId'].some((key) => current.raft[key] !== preview.raft[key])))) {
+      throw new Error('桥接连接配置已变化，请重新运行 setup。');
+    }
+    const next = validateConfig({ ...(current ?? preview), larkBinary: preview.larkBinary, bindings: [...(current?.bindings ?? []), binding] });
+    if (newCredential) await writeJson(files.credential, { token: newCredential });
+    return next;
+  });
 }
 
 export async function loadCredential(files) {
