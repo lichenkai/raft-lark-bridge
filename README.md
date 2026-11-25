@@ -33,7 +33,7 @@ npm ci
 npm run preflight
 ```
 
-如果已经下载项目，先进入项目目录，再运行 `npm ci`。`preflight` 检查 Node.js、项目依赖版本、Lark CLI 版本和本机 profile 登录状态，发现缺项时给出下一条命令。用 `npm run preflight -- --check-updates` 查询 Lark CLI 更新。安装和升级分别使用 `npx @larksuite/cli@latest install` 和 `lark-cli update`。选定的 profile 需要能以用户身份搜索、读取和回复消息。 [Lark CLI 安装与授权](https://github.com/larksuite/cli/blob/main/README.zh.md)
+如果已经下载项目，先进入项目目录，再运行 `npm ci`。`preflight` 检查 Node.js、项目依赖版本、Lark CLI 版本和本机 profile 登录状态，发现缺项时给出下一条命令。用 `node src/preflight.js --check-updates` 查询 Lark CLI 更新。安装和升级分别使用 `npx @larksuite/cli@latest install` 和 `lark-cli update`。选定的 profile 需要能以用户身份搜索、读取和回复消息。 [Lark CLI 安装与授权](https://github.com/larksuite/cli/blob/main/README.zh.md)
 
 ### 2. 在 Raft 创建桥接身份
 
@@ -97,16 +97,16 @@ npx skills add lichenkai/raft-lark-bridge --skill raft-lark-bridge
 | 命令 | 用途 |
 | --- | --- |
 | `npm run status` | 查看绑定、队列和近期错误 |
-| `npm run bridge -- preview <绑定>` | 预览命中的消息，无需转发 |
-| `npm run bridge -- pause <绑定>` | 暂停绑定，已经提交的请求仍可能完成 |
-| `npm run bridge -- resume <绑定>` | 继续处理待办消息，从保存的位置补读 |
+| `npm run bridge preview <绑定>` | 预览命中的消息，无需转发 |
+| `npm run bridge pause <绑定>` | 暂停绑定，已经提交的请求仍可能完成 |
+| `npm run bridge resume <绑定>` | 继续处理待办消息，从保存的位置补读 |
 | `npm run clear` | 列出绑定，选择并确认删除一条 |
-| `npm run bridge -- unbind <绑定>` | 解除绑定 |
-| `npm run bridge -- run --once` | 执行一轮实际转发和回复 |
+| `npm run bridge unbind <绑定>` | 解除绑定 |
+| `node src/cli.js run --once` | 执行一轮实际转发和回复 |
 
 同一飞书登录身份与会话的组合只允许一条绑定。更改规则时，先用 `status` 查看「待转发、等回复、待回信」。需要保留的待办处理完成后，解除旧绑定，再对同一个群运行 `setup`。从「群聊 @我」改为「群聊」会把转发范围扩大到该群的合格文本消息。
 
-配置、Raft 凭证和 SQLite 数据库默认存放在 `~/.raft-lark-bridge`。如果有多个实例，每条命令都传同一个 `--data-dir`，例如 `npm run status -- --data-dir ~/work-bridge`。
+配置、Raft 凭证和 SQLite 数据库默认存放在 `~/.raft-lark-bridge`。如果有多个实例，每条命令都传同一个 `--data-dir`，例如 `node src/cli.js status --data-dir ~/work-bridge`。
 
 飞书里的真实点名按绑定用户 ID 匹配。桥接发给 Raft 时会把命中的 `@` 换成目标 Agent 的 handle，飞书原消息和预览保留飞书显示的名称。
 
@@ -122,9 +122,9 @@ tail -F ~/.raft-lark-bridge/bridge.log
 - **macOS** 使用用户级 LaunchAgent。
 - **Ubuntu、CentOS Stream 等 systemd Linux** 使用 `systemctl --user`。通过 SSH 登录运行账号后完成授权和配置。要在系统启动后自动运行，并在退出 SSH 后继续运行，请让管理员执行 `sudo loginctl enable-linger <运行账号>`。[systemd 用户服务与 linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20USER%E2%80%A6)
 
-`npm stop` 停止后台服务。`npm run bridge -- service remove` 移除服务，保留绑定和 SQLite 状态。自定义 `--data-dir` 时，管理命令需传同一个目录，`bridge.log` 也在该目录内。绑定修改在下一轮生效。移动安装位置或更换 Node.js 路径后，再运行 `npm start`。
+`npm stop` 停止后台服务。`npm run bridge service remove` 移除服务，保留绑定和 SQLite 状态。自定义 `--data-dir` 时，管理命令需传同一个目录，`bridge.log` 也在该目录内。绑定修改在下一轮生效。移动安装位置或更换 Node.js 路径后，再运行 `npm start`。
 
-`npm start -- --debug` 切到当前终端持续运行，同时把调试日志写到 `bridge.log`。同一配置的后台服务正在运行时，会先停止它。用 Ctrl+C 结束前台调试，再运行 `npm start` 恢复后台运行。需要后台持续记录调试日志时，使用 `npm run bridge -- service install --debug`。
+`npm start debug` 切到当前终端持续运行，同时把调试日志写到 `bridge.log`。同一配置的后台服务正在运行时，会先停止它。用 Ctrl+C 结束前台调试，再运行 `npm start` 恢复后台运行。需要后台持续记录调试日志时，使用 `node src/cli.js service install --debug`。
 
 日志包含关键事件、时间、短 ID 和错误码。每达到 8 MiB 就轮转一次，保留一份 `bridge.log.1`。调试模式额外记录每轮处理、Lark 身份检查、会话历史、搜索和 Raft 收件箱耗时。
 
@@ -187,7 +187,7 @@ npm ci
 npm run preflight
 ```
 
-If you already downloaded the project, enter its directory and start with `npm ci`. `preflight` checks Node.js, the project dependency version, the Lark CLI version, and local profile sign-in. It gives the next command when a check fails. Run `npm run preflight -- --check-updates` to check for Lark CLI updates. Use `npx @larksuite/cli@latest install` to install it and `lark-cli update` to upgrade it. The selected profile needs user permission to search, read, and reply to messages. [Lark CLI setup and authorization](https://github.com/larksuite/cli#installation)
+If you already downloaded the project, enter its directory and start with `npm ci`. `preflight` checks Node.js, the project dependency version, the Lark CLI version, and local profile sign-in. It gives the next command when a check fails. Run `node src/preflight.js --check-updates` to check for Lark CLI updates. Use `npx @larksuite/cli@latest install` to install it and `lark-cli update` to upgrade it. The selected profile needs user permission to search, read, and reply to messages. [Lark CLI setup and authorization](https://github.com/larksuite/cli#installation)
 
 #### 2. Create a bridge identity in Raft
 
@@ -249,16 +249,16 @@ Run `npm run setup` again to add a binding. Use a binding name or the ID shown b
 | Command | What it does |
 | --- | --- |
 | `npm run status` | Show bindings, queue counts, and recent errors |
-| `npm run bridge -- preview <binding>` | Preview matching messages without forwarding |
-| `npm run bridge -- pause <binding>` | Pause a binding. Requests already submitted can still finish |
-| `npm run bridge -- resume <binding>` | Resume pending work and catch up from the saved search position |
+| `npm run bridge preview <binding>` | Preview matching messages without forwarding |
+| `npm run bridge pause <binding>` | Pause a binding. Requests already submitted can still finish |
+| `npm run bridge resume <binding>` | Resume pending work and catch up from the saved search position |
 | `npm run clear` | List bindings and confirm which one to remove |
-| `npm run bridge -- unbind <binding>` | Remove a binding |
-| `npm run bridge -- run --once` | Run one cycle with forwarding and replies enabled |
+| `npm run bridge unbind <binding>` | Remove a binding |
+| `node src/cli.js run --once` | Run one cycle with forwarding and replies enabled |
 
 Each Lark login and chat pair can have one binding. To change its rule, check `status` for queued forwards, outstanding agent replies, and replies ready for Lark. Let wanted replies finish, remove the existing binding, then run `setup` for the same group. Switching from group mentions to group chat forwards all eligible text across that group.
 
-Configuration, the Raft credential, and the SQLite database live in `~/.raft-lark-bridge` by default. If you run more than one instance, pass the same `--data-dir` to every command for that instance, for example `npm run status -- --data-dir ~/work-bridge`.
+Configuration, the Raft credential, and the SQLite database live in `~/.raft-lark-bridge` by default. If you run more than one instance, pass the same `--data-dir` to every command for that instance, for example `node src/cli.js status --data-dir ~/work-bridge`.
 
 The bridge matches actual Lark mentions by the bound user ID. In Raft, those mentions use the target Agent's handle. The original Lark message and the preview show the Lark display name.
 
@@ -274,9 +274,9 @@ tail -F ~/.raft-lark-bridge/bridge.log
 - **macOS** uses a user-level LaunchAgent.
 - **Ubuntu, CentOS Stream, and other Linux distributions with systemd** use `systemctl --user`. Sign in over SSH as the service account to authorize Lark CLI and configure the bridge. To run at boot and stay active after SSH logout, have an administrator run `sudo loginctl enable-linger <service-account>`. [systemd user lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20USER%E2%80%A6)
 
-Use `npm stop` to stop the background service and `npm run bridge -- service remove` to remove it while preserving bindings and SQLite state. If you use a custom `--data-dir`, pass it to every service command and look for `bridge.log` in that directory. Binding changes take effect on the next cycle. Run `npm start` again if you move the checkout or change the Node.js path.
+Use `npm stop` to stop the background service and `npm run bridge service remove` to remove it while preserving bindings and SQLite state. If you use a custom `--data-dir`, pass it to every service command and look for `bridge.log` in that directory. Binding changes take effect on the next cycle. Run `npm start` again if you move the checkout or change the Node.js path.
 
-Use `npm start -- --debug` to keep the bridge running in the current terminal and write the same debug events to `bridge.log`. It first stops a running background service for the same configuration. Press Ctrl+C to end the foreground run, then run `npm start` to return to background operation. For debug logging in the background, use `npm run bridge -- service install --debug`.
+Use `npm start debug` to keep the bridge running in the current terminal and write the same debug events to `bridge.log`. It first stops a running background service for the same configuration. Press Ctrl+C to end the foreground run, then run `npm start` to return to background operation. For debug logging in the background, use `node src/cli.js service install --debug`.
 
 Logs record key events, timestamps, short IDs, and error codes. They rotate at 8 MiB and retain one previous file, `bridge.log.1`. Debug mode adds cycle, Lark identity, chat history and search, and Raft inbox timings.
 

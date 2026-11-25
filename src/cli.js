@@ -25,7 +25,7 @@ const usage = `Raft ↔ Lark 本地桥接
   raft-lark-bridge status                  查看绑定、队列和错误
   raft-lark-bridge doctor                  检查两端身份和消息读取
   raft-lark-bridge preview <绑定>           查看匹配预览
-  raft-lark-bridge start [--debug]          后台启动，或在前台实时输出调试日志
+  raft-lark-bridge start [debug]            后台启动，或在前台实时输出调试日志
   raft-lark-bridge run [--once] [--debug]  前台运行，或处理一轮
   raft-lark-bridge pause <绑定>             暂停绑定
   raft-lark-bridge resume <绑定>            恢复绑定
@@ -332,11 +332,14 @@ async function main() {
     'data-dir': { type: 'string' }, once: { type: 'boolean' }, debug: { type: 'boolean' }, managed: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   } });
-  const [command, argument, ...extra] = positionals;
+  const [command, requestedArgument, ...extra] = positionals;
   if (!command || values.help || command === 'help') return console.log(usage);
+  const positionalDebug = command === 'start' && requestedArgument === 'debug';
+  const argument = positionalDebug ? undefined : requestedArgument;
+  const debug = values.debug || positionalDebug;
   const start = command === 'start' && !argument;
   if (extra.length || ((values.once || values.managed) && command !== 'run') ||
-      (values.debug && !start && command !== 'run' && !(command === 'service' && argument === 'install'))) {
+      (debug && !start && command !== 'run' && !(command === 'service' && argument === 'install'))) {
     throw new Error('参数无效。请运行 --help。');
   }
   const files = paths(values['data-dir']);
@@ -346,10 +349,10 @@ async function main() {
   await ensureDirectory(files);
   if (values.managed) runLog = fileLog(files.log);
   const config = await loadConfig(files);
-  const foregroundDebug = start && values.debug;
+  const foregroundDebug = start && debug;
   if (command === 'service' || (start && !foregroundDebug)) {
     await makeLark(config.larkBinary).requireReplySupport();
-    return service('install', files, config, entry, values.debug);
+    return service('install', files, config, entry, debug);
   }
   if (command === 'status' && !argument) {
     const store = new Store(files.database);
@@ -370,7 +373,7 @@ async function main() {
   await lark.requireReplySupport();
   const raft = makeRaft(config.raft.url, await loadCredential(files));
   if (command === 'doctor') return doctor(config, lark, raft);
-  return run(files, config, raft, { ...values, foregroundDebug });
+  return run(files, config, raft, { ...values, debug, foregroundDebug });
 }
 
 main().catch((error) => {

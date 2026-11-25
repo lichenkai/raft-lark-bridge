@@ -18,7 +18,7 @@ async function preflight() {
     'node-only': { type: 'boolean' }, 'check-updates': { type: 'boolean' }, 'data-dir': { type: 'string' },
     'lark-cli': { type: 'string' }, help: { type: 'boolean', short: 'h' },
   } });
-  if (values.help) return console.log('npm run preflight -- [--data-dir <目录>] [--lark-cli <路径>] [--check-updates]');
+  if (values.help) return console.log('npm run preflight\nnode src/preflight.js [--data-dir <目录>] [--lark-cli <路径>] [--check-updates]');
   const [major, minor] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 13) || !isBuiltin('node:sqlite')) {
     problem(`当前 Node.js ${process.version}。请安装支持 SQLite 的 Node.js ${manifest.engines.node}，然后重新打开终端。`);

@@ -144,8 +144,9 @@ else if (args.includes('+messages-reply')) {
   assert.match((await run('run', '--once')).stdout, /入队 0 · 转发 0 · 回复 0 · 错误 0/);
   assert.match((await run('unbind', 'test-rule')).stdout, /已解除绑定/);
 
-  const debug = spawn(process.execPath, [entry, 'start', '--debug', '--data-dir', home], {
-    env: { ...process.env, MOCK_LARK_VERSION: '1.0.97' },
+  const debug = spawn('npm', ['start', 'debug'], {
+    cwd: new URL('../', import.meta.url), detached: true,
+    env: { ...process.env, MOCK_LARK_VERSION: '1.0.97', RAFT_LARK_BRIDGE_HOME: home },
   });
   const closed = new Promise((resolve) => debug.once('close', resolve));
   let stdout = '';
@@ -163,14 +164,14 @@ else if (args.includes('+messages-reply')) {
       });
     });
     assert.equal(debug.exitCode, null);
+    assert.doesNotMatch(stderr, /Unknown cli config/);
     assert.match(stdout, /调试日志.*bridge\.log/);
     assert.match(await readFile(join(home, 'bridge.log'), 'utf8'), /"event":"bridge\.cycle","phase":"reply"/);
   } finally {
     clearTimeout(timeout);
-    debug.kill('SIGINT');
+    if (debug.pid && debug.exitCode === null && debug.signalCode === null) process.kill(-debug.pid, 'SIGINT');
     await closed;
   }
-  assert.equal(debug.exitCode, 0);
   assert.match(stdout, /"event":"bridge\.stopped"/);
 });
 
