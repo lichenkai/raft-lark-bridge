@@ -28,6 +28,10 @@ function journalFixture(t) {
   return { journal, advance(milliseconds) { now += milliseconds; } };
 }
 
+function direct(send) {
+  return (notice, beforeSend) => beforeSend() ? send(notice) : null;
+}
+
 test('retries group sends with the same UUID and marks only confirmed group receipts', async (t) => {
   const { journal } = journalFixture(t);
   const attempts = [];
@@ -36,8 +40,8 @@ test('retries group sends with the same UUID and marks only confirmed group rece
     if (attempts.length === 1) throw Error('ambiguous network error');
     return { chatId, messageId: 'om_sent' };
   };
-  assert.deepEqual(await journal.flush(serverId, send), { sent: 1, pending: 1, needsReview: 0 });
-  assert.deepEqual(await journal.flush(serverId, send), { sent: 1, pending: 0, needsReview: 0 });
+  assert.deepEqual(await journal.flush(serverId, direct(send)), { sent: 1, pending: 1, needsReview: 0 });
+  assert.deepEqual(await journal.flush(serverId, direct(send)), { sent: 1, pending: 0, needsReview: 0 });
   assert.deepEqual(attempts[0], attempts[2]);
   assert.notEqual(attempts[0].id, attempts[1].id);
   assert.deepEqual(journal.pending(serverId), []);
@@ -46,11 +50,11 @@ test('retries group sends with the same UUID and marks only confirmed group rece
 test('closing trace while a group send is in flight stops the rest', async (t) => {
   const { journal } = journalFixture(t);
   let attempts = 0;
-  await journal.flush(serverId, async () => {
+  await journal.flush(serverId, direct(async () => {
     attempts += 1;
     journal.disable(serverId);
     return { chatId, messageId: 'om_accepted' };
-  });
+  }));
   assert.equal(attempts, 1);
   assert.deepEqual(journal.pending(serverId), []);
 });
@@ -58,7 +62,7 @@ test('closing trace while a group send is in flight stops the rest', async (t) =
 test('ambiguous sends beyond the Lark dedup time require review before sending again', async (t) => {
   const { journal, advance } = journalFixture(t);
   const failSend = async () => { throw Error('unknown receipt'); };
-  assert.deepEqual(await journal.flush(serverId, failSend), { sent: 0, pending: 2, needsReview: 0 });
+  assert.deepEqual(await journal.flush(serverId, direct(failSend)), { sent: 0, pending: 2, needsReview: 0 });
   advance(60 * 60 * 1000);
   assert.deepEqual(await journal.flush(serverId, async () => assert.fail('must not resend')), {
     sent: 0, pending: 0, needsReview: 2,
@@ -73,7 +77,7 @@ test('a batch of expired traces does not block dispatch of new ones', async (t) 
       confirmedAt: '2026-12-01T12:00:00Z', senderName: '发起人', recipientName: '用户',
     });
   }
-  const failed = await journal.flush(serverId, async () => { throw Error('unknown receipt'); });
+  const failed = await journal.flush(serverId, direct(async () => { throw Error('unknown receipt'); }));
   assert.equal(failed.pending, 100);
   advance(60 * 60 * 1000);
   journal.record({
@@ -126,7 +130,7 @@ test('while app credentials are loading, disabling or changing the group cancels
 
 test('a retry crossing the dedup deadline while waiting for credentials never sends', async (t) => {
   const { journal, advance } = journalFixture(t);
-  await journal.flush(serverId, async () => { throw Error('ambiguous HTTP result'); });
+  await journal.flush(serverId, direct(async () => { throw Error('ambiguous HTTP result'); }));
   advance(59 * 60 * 1000);
   const transport = slowBot();
   const run = journal.flush(serverId, transport.send);
@@ -171,4 +175,31 @@ test('upgrades a prior main trace database and preserves its verified group and 
   });
   assert.equal(run.sent, 1);
   assert.deepEqual(journal.pending(serverId), []);
+});
+
+test('failure to obtain credentials does not start the trace send dedup clock', async (t) => {
+  const { journal, advance } = journalFixture(t);
+  let authenticated = false;
+  let httpRequests = 0;
+  const bot = makeLarkBot({
+    region: 'lark',
+    getTenantToken: () => {
+      if (!authenticated) throw Error('credentials unavailable');
+      return 'example-token';
+    },
+    fetcher: async () => {
+      httpRequests += 1;
+      return Response.json({ code: 0, data: { chat_id: chatId, message_id: 'om_sent', create_time: String(start) } });
+    },
+  });
+  const send = (notice, beforeSend) => bot.sendTrace({
+    actor: { tenantId: 'tenant', appId: 'cli_example' }, chatId: notice.chatId,
+    idempotencyKey: notice.id, text: notice.text, beforeSend,
+  });
+  assert.deepEqual(await journal.flush(serverId, send), { sent: 0, pending: 2, needsReview: 0 });
+  assert.equal(httpRequests, 0);
+  advance(60 * 60 * 1000);
+  authenticated = true;
+  assert.deepEqual(await journal.flush(serverId, send), { sent: 2, pending: 0, needsReview: 0 });
+  assert.equal(httpRequests, 2);
 });

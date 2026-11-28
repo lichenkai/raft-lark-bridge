@@ -64,6 +64,7 @@ const relay = new QuestionRelay({
   },
   lark: {
     sendCard: (input) => {
+      if (!input.beforeSend()) return null;
       card = input.card;
       return { messageId: 'om_preview_card', confirmedAt: deliveredAt };
     },

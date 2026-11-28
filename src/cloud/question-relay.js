@@ -132,19 +132,26 @@ export class QuestionRelay {
         || JSON.stringify(previousRendering?.answers) !== row.answers_json) {
         return { state: 'needs_review', deliveryId: row.id };
       }
-      this.#db.prepare(`
-        UPDATE cloud_question_delivery SET first_attempt_at = COALESCE(first_attempt_at, ?) WHERE id = ?
-      `).run(this.#clock(), row.id);
-      row = this.#deliveryById(row.id);
-      if (this.#clock() - row.first_attempt_at >= LARK_SEND_DEDUP_MS) return { state: 'needs_review', deliveryId: row.id };
+      if (this.#dedupExpired(row)) return { state: 'needs_review', deliveryId: row.id };
+      const beforeSend = () => {
+        const now = this.#clock();
+        return this.#db.prepare(`
+          UPDATE cloud_question_delivery SET first_attempt_at = COALESCE(first_attempt_at, ?)
+          WHERE id = ? AND message_id IS NULL AND (first_attempt_at IS NULL OR first_attempt_at > ?)
+        `).run(now, row.id, now - LARK_SEND_DEDUP_MS).changes === 1;
+      };
       try {
-        const receipt = await this.#lark.sendCard({ actor: binding.actor, card: JSON.parse(row.card_json), idempotencyKey: row.id });
+        const receipt = await this.#lark.sendCard({
+          actor: binding.actor, card: JSON.parse(row.card_json), idempotencyKey: row.id, beforeSend,
+        });
         const delivered = this.#confirmDelivery(row.id, receipt);
         if (delivered) return this.#finishDelivery(delivered, binding);
       } catch {
         // The send may already have succeeded, so the recorded UUID is retained.
       }
-      return { state: 'pending', deliveryId: row.id };
+      row = this.#deliveryById(row.id);
+      if (row.message_id) return this.#finishDelivery(row, binding);
+      return { state: this.#dedupExpired(row) ? 'needs_review' : 'pending', deliveryId: row.id };
     });
   }
 
@@ -201,6 +208,10 @@ export class QuestionRelay {
         return { state: 'pending' };
       }
     });
+  }
+
+  #dedupExpired(row) {
+    return row.first_attempt_at !== null && this.#clock() - row.first_attempt_at >= LARK_SEND_DEDUP_MS;
   }
 
   #expired(card) {

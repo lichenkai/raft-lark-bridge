@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeLarkBot } from '../src/cloud/lark-bot.js';
+import { QuestionRelay } from '../src/cloud/question-relay.js';
 
 const actor = { tenantId: 'tenant-example', appId: 'cli_example', openId: 'ou_example' };
 const idempotencyKey = '99990000-0000-4000-8000-000000000001';
@@ -130,4 +131,48 @@ test('the bot can replace the card on the confirmed message without sending a ne
     },
   });
   assert.deepEqual(await bot.updateCard({ actor, card, messageId: 'om_example' }), { messageId: 'om_example' });
+});
+
+test('a private card retry crossing the dedup deadline during credential fetch never resends', async (t) => {
+  const start = Date.parse(createdAt);
+  let now = start;
+  let tokenRequests = 0;
+  let messageRequests = 0;
+  const waiting = Promise.withResolvers();
+  const released = Promise.withResolvers();
+  const bot = makeLarkBot({
+    region: 'lark',
+    getTenantToken: async () => {
+      tokenRequests += 1;
+      if (tokenRequests === 1) return 'example-token';
+      waiting.resolve();
+      return released.promise;
+    },
+    fetcher: async () => {
+      messageRequests += 1;
+      throw Error('ambiguous message response');
+    },
+  });
+  const source = { serverId: 'r1', cardId: 'card', recipientId: 'person' };
+  const relay = new QuestionRelay({
+    path: ':memory:', clock: () => now,
+    bindings: () => ({ id: 'binding', revision: '1', actor, raftOrigin: 'https://raft.example.com', mode: 'answer' }),
+    raft: { readCard: () => ({
+      type: 'question:ask', version: 'bridge-preview-1', status: 'open', recipientId: source.recipientId,
+      title: '试点确认', originalUrl: 'https://raft.example.com/messages/example',
+      questions: [{ id: 'q1', kind: 'single', text: '确认收到？', required: true, allowOther: false,
+        options: [{ label: '收到', value: 'yes' }] }],
+    }) },
+    lark: bot,
+  });
+  t.after(() => relay.close());
+  const first = await relay.deliver(source);
+  assert.equal(first.state, 'pending');
+  now += 3_599_000;
+  const retry = relay.deliver(source);
+  await waiting.promise;
+  now += 10_000;
+  released.resolve('example-token');
+  assert.deepEqual(await retry, { state: 'needs_review', deliveryId: first.deliveryId });
+  assert.equal(messageRequests, 1);
 });

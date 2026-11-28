@@ -167,24 +167,25 @@ export class TraceJournal {
             AND s.enabled_since IS NOT NULL)
     `);
     const result = { sent: 0, pending: 0, needsReview: review.run(serverId, this.#clock() - LARK_SEND_DEDUP_MS).changes };
+    const eligible = `server_id = ? AND id = ? AND sent_message_id IS NULL AND review_required = 0 AND EXISTS (
+      SELECT 1 FROM cloud_trace_settings s WHERE s.server_id = cloud_trace_notices.server_id
+        AND s.revision = cloud_trace_notices.revision AND s.enabled_since IS NOT NULL
+    )`;
+    const check = this.#db.prepare(`SELECT 1 FROM cloud_trace_notices WHERE ${eligible}`);
     const begin = this.#db.prepare(`
       UPDATE cloud_trace_notices SET first_attempt_at = COALESCE(first_attempt_at, ?)
-      WHERE server_id = ? AND id = ? AND sent_message_id IS NULL AND review_required = 0 AND EXISTS (
-        SELECT 1 FROM cloud_trace_settings s WHERE s.server_id = cloud_trace_notices.server_id
-          AND s.revision = cloud_trace_notices.revision AND s.enabled_since IS NOT NULL
-      )
-      RETURNING first_attempt_at
+      WHERE ${eligible}
     `);
 
     for (const notice of this.pending(serverId)) {
-      let permitted;
+      if (!check.get(serverId, notice.id)) continue;
+      let permitted = true;
       const beforeSend = () => {
         const now = this.#clock();
         result.needsReview += review.run(serverId, now - LARK_SEND_DEDUP_MS).changes;
-        permitted = Boolean(begin.get(now, serverId, notice.id));
+        permitted = begin.run(now, serverId, notice.id).changes === 1;
         return permitted;
       };
-      if (!beforeSend()) continue;
       try {
         // The Lark adapter rechecks after asynchronous token acquisition.
         const receipt = await send(notice, beforeSend);

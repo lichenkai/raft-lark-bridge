@@ -94,9 +94,9 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
   }
 
   return {
-    async sendCard({ actor, card, idempotencyKey }) {
+    async sendCard({ actor, card, idempotencyKey, beforeSend }) {
       if (card?.schema !== '2.0') throw new LarkSendError('invalid_request');
-      return send(actor, actor?.openId, 'open_id', 'interactive', card, idempotencyKey);
+      return send(actor, actor?.openId, 'open_id', 'interactive', card, idempotencyKey, beforeSend);
     },
 
     // Only call for authenticated card-click events associated with a known

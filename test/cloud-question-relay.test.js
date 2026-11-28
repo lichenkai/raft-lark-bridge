@@ -57,6 +57,7 @@ function fixture({ path = ':memory:', traceFails = false, traceFailsOnce = false
     lark: {
       readCardReceipt: async (...args) => readOverride ? readOverride(...args) : (recoverableReceipt ? deliveryReceipt : null),
       sendCard: async (input) => {
+        if (!input.beforeSend()) return null;
         sent.push(input);
         if (loseNextDelivery) {
           loseNextDelivery = false;
