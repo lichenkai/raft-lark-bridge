@@ -107,7 +107,7 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
       const message = data?.items?.[0];
       const sender = message?.sender;
       if (data?.items?.length !== 1 || message?.message_id !== messageId
-        || message.msg_type !== 'interactive' || message.deleted !== false
+        || !['interactive', 'card'].includes(message.msg_type) || message.deleted !== false
         || sender?.sender_type !== 'app' || sender.id_type !== 'app_id'
         || sender.id !== actor.appId || sender.tenant_key !== actor.tenantId) return null;
       try {
@@ -116,6 +116,15 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
       } catch {
         return null;
       }
+    },
+
+    async updateCard({ actor, card, messageId }) {
+      if (!matchingId(messageId, 'om_') || card?.schema !== '2.0') throw new LarkSendError('invalid_request');
+      const url = new URL(`${endpoint.pathname}/${messageId}`, endpoint);
+      const body = JSON.stringify({ content: JSON.stringify(card) });
+      if (Buffer.byteLength(body) > CARD_LIMIT_BYTES) throw new LarkSendError('message_too_large');
+      await request(actor, url, 'update', { method: 'PATCH', body });
+      return { messageId };
     },
 
     async sendTrace({ actor, chatId, text, idempotencyKey }) {

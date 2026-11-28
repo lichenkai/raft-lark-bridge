@@ -99,6 +99,9 @@ test('receipt recovery accepts only a matching card sent by the same Lark app an
     messageId: 'om_example', chatId: 'oc_trace', confirmedAt: createdAt,
   });
 
+  returned = { ...message, msg_type: 'card' };
+  assert.equal((await bot.readCardReceipt(lookup)).messageId, 'om_example');
+
   for (const changes of [
     { deleted: true },
     { sender: { ...message.sender, tenant_key: 'foreign_tenant' } },
@@ -109,4 +112,19 @@ test('receipt recovery accepts only a matching card sent by the same Lark app an
     returned = { ...message, ...changes };
     assert.equal(await bot.readCardReceipt(lookup), null);
   }
+});
+
+test('the bot can replace the card on the confirmed message without sending a new one', async () => {
+  const card = { schema: '2.0', body: { elements: [{ tag: 'div', text: { tag: 'plain_text', content: '已在 Raft 作答' } }] } };
+  const bot = makeLarkBot({
+    region: 'lark',
+    getTenantToken: async () => 'example-token',
+    fetcher: async (url, init) => {
+      assert.equal(String(url), 'https://open.larksuite.com/open-apis/im/v1/messages/om_example');
+      assert.equal(init.method, 'PATCH');
+      assert.deepEqual(JSON.parse(init.body), { content: JSON.stringify(card) });
+      return Response.json({ code: 0, data: {} });
+    },
+  });
+  assert.deepEqual(await bot.updateCard({ actor, card, messageId: 'om_example' }), { messageId: 'om_example' });
 });
