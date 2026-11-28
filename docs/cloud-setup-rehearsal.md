@@ -27,3 +27,12 @@
 Agent 先查项目当前实现和设定，说明这是受审的预演。应用注册、分享、权限审批和个人登录需要对应身份。能模拟的检查单列为模拟结果，真实投递和原卡回写等待平台能力、部署件和试点确认。
 
 [Raft 安装后设置](https://docs.raft.build/developers/raft-apps/build/#installation-setup) · [飞书自建应用发布](https://open.larksuite.com/document/home/introduction-to-custom-app-development/self-built-application-development-process)
+
+## 运行本地合成样例
+
+```sh
+node src/cloud/preview.js
+node src/cloud/preview.js --link-only
+```
+
+第一条输出飞书 JSON 2.0 示例卡、模拟 Raft 回执和同编号的两条群追踪。第二条显示只可打开原卡时的提醒和单条投递追踪。两个命令使用内存 SQLite 和本地模拟接口，均无网络调用。真实部署设置页、机器人回调和 Raft 个人权限由后续联调验证。 [实施计划](../specs/cloud-question-cards/implementation-plan.md)
