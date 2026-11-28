@@ -1,5 +1,9 @@
 const PREVIEW_SCHEMA = 'bridge-preview-1';
 const QUESTION_KINDS = new Set(['single', 'multiple', 'text']);
+const DIRECT_CARD_FIELDS = new Set([
+  'type', 'version', 'status', 'recipientId', 'title', 'description', 'senderName', 'sourceLabel',
+  'originalUrl', 'expiresAt', 'questions',
+]);
 const DIRECT_QUESTION_FIELDS = new Set(['id', 'kind', 'text', 'description', 'required', 'allowOther', 'options']);
 const DIRECT_OPTION_FIELDS = new Set(['label', 'value']);
 
@@ -40,6 +44,8 @@ function button(label, behavior, type = 'default') {
 
 function canAnswer(card, settings) {
   if (settings.mode !== 'answer' || !isText(settings.deliveryId) || card.questions.length !== 1) return false;
+  if (!Object.keys(card).every((key) => DIRECT_CARD_FIELDS.has(key))
+    || (card.description !== undefined && typeof card.description !== 'string')) return false;
   const [question] = card.questions;
   if (question.kind !== 'single' || question.allowOther !== false
     || (question.description !== undefined && typeof question.description !== 'string')) return false;

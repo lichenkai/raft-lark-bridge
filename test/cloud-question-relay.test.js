@@ -33,6 +33,7 @@ function fixture({ path = ':memory:', traceFails = false, traceFailsOnce = false
   let loseNextResponse = false;
   let loseNextDelivery = false;
   let recoverableReceipt = false;
+  let readOverride;
   let traceFailureCount = 0;
   const deliveryReceipt = { messageId: 'om_card', confirmedAt: offsetReceipt ? '2026-12-01T20:00:00+08:00' : confirmedAt };
   const options = {
@@ -54,7 +55,7 @@ function fixture({ path = ':memory:', traceFails = false, traceFailsOnce = false
       },
     },
     lark: {
-      readCardReceipt: async () => recoverableReceipt ? deliveryReceipt : null,
+      readCardReceipt: async (...args) => readOverride ? readOverride(...args) : (recoverableReceipt ? deliveryReceipt : null),
       sendCard: async (input) => {
         sent.push(input);
         if (loseNextDelivery) {
@@ -74,6 +75,7 @@ function fixture({ path = ':memory:', traceFails = false, traceFailsOnce = false
     loseResponse() { loseNextResponse = true; },
     loseDelivery() { loseNextDelivery = true; },
     allowReceiptRead() { recoverableReceipt = true; },
+    overrideReceiptReader(read) { readOverride = read; },
     rebind() { currentBinding = { ...binding, revision: '2' }; },
     changeCard() { currentCard = { ...card, title: '改了问题' }; },
     answerElsewhere() {
@@ -224,4 +226,40 @@ test('a staged click never submits against a different confirmed Lark message', 
   assert.equal(system.submissions.length, 0);
   assert.equal((await system.relay.answer({ ...click, messageId: 'om_card', option: 1 })).state, 'answered');
   assert.deepEqual(system.submissions[0].answer, { questionId: 'confirm', optionValue: 'wait' });
+});
+
+test('a correct pending click is recovered even when a wrong message ID was staged first', async (t) => {
+  const system = fixture();
+  t.after(() => system.close());
+  system.loseDelivery();
+  const delivery = await system.relay.deliver(source);
+  const click = { deliveryId: delivery.deliveryId, messageId: 'om_card', option: 1, actor };
+  assert.equal((await system.relay.answer({ ...click, messageId: 'om_unrelated', option: 0 })).state, 'pending');
+  assert.equal((await system.relay.answer(click)).state, 'pending');
+
+  assert.equal((await system.relay.deliver(source)).state, 'delivered');
+  assert.equal(system.submissions.length, 1);
+  assert.deepEqual(system.submissions[0].answer, { questionId: 'confirm', optionValue: 'wait' });
+});
+
+test('a concurrent delivery confirmation resumes a staged click before a read can report it missing', async (t) => {
+  const system = fixture();
+  t.after(() => system.close());
+  system.loseDelivery();
+  const delivery = await system.relay.deliver(source);
+  const reading = Promise.withResolvers();
+  const receipt = Promise.withResolvers();
+  system.overrideReceiptReader(() => {
+    reading.resolve();
+    return receipt.promise;
+  });
+  const submitted = system.relay.answer({ deliveryId: delivery.deliveryId, messageId: 'om_card', option: 0, actor });
+  await reading.promise;
+  const retried = system.relay.deliver(source);
+  await new Promise((resolve) => setImmediate(resolve));
+  receipt.resolve(null);
+  const [answer, deliveryAfterRetry] = await Promise.all([submitted, retried]);
+  assert.equal(deliveryAfterRetry.state, 'delivered');
+  assert.equal(answer.state, 'answered');
+  assert.equal(system.submissions.length, 1);
 });

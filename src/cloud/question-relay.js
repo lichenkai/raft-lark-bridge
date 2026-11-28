@@ -64,8 +64,6 @@ export class QuestionRelay {
         first_attempt_at INTEGER,
         message_id TEXT,
         delivered_at TEXT,
-        pending_lark_message_id TEXT,
-        pending_lark_choice INTEGER,
         choice INTEGER,
         raft_receipt_id TEXT,
         answered_at TEXT,
@@ -74,6 +72,12 @@ export class QuestionRelay {
         outside_answer_json TEXT,
         closed INTEGER NOT NULL DEFAULT 0,
         UNIQUE (server_id, card_id, recipient_id)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS cloud_question_click (
+        delivery_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        choice INTEGER NOT NULL,
+        PRIMARY KEY(delivery_id, message_id)
       ) STRICT;
     `);
   }
@@ -156,14 +160,16 @@ export class QuestionRelay {
     if (!clickActor || clickActor !== actorKey(binding?.actor) || bindingKey(binding) !== row.binding_key
       || binding.mode !== 'answer' || !JSON.parse(row.answers_json)[option]) return { state: 'rejected' };
 
+    let delivery = this.#deliveryById(deliveryId);
+    if (!delivery.message_id) {
+      if (delivery.first_attempt_at === null) return { state: 'rejected' };
+      delivery = await this.#confirmClickDelivery(delivery, { messageId, option, binding });
+      if (!delivery.message_id) return { state: 'pending' };
+    }
+    if (delivery.message_id !== messageId) return { state: 'rejected' };
+
     return this.#once(`answer:${deliveryId}`, async () => {
-      let latest = this.#deliveryById(deliveryId);
-      if (!latest.message_id) {
-        if (latest.first_attempt_at === null) return { state: 'rejected' };
-        latest = await this.#confirmClickDelivery(latest, { messageId, option, binding });
-        if (!latest) return { state: 'pending' };
-      }
-      if (latest.message_id !== messageId) return { state: 'rejected' };
+      const latest = this.#deliveryById(deliveryId);
       if (latest.raft_receipt_id) return this.#answered(latest);
       this.#flushTraces(latest);
       if (latest.closed) return this.#terminalView(latest);
@@ -185,7 +191,7 @@ export class QuestionRelay {
           return { state: 'rejected' };
         }
 
-        const stagedOption = latest.pending_lark_message_id === messageId ? latest.pending_lark_choice : option;
+        const stagedOption = this.#pendingChoice(latest.id, latest.message_id) ?? option;
         this.#db.prepare('UPDATE cloud_question_delivery SET choice = COALESCE(choice, ?) WHERE id = ?').run(stagedOption, row.id);
         const choice = this.#deliveryById(row.id).choice;
         const answer = JSON.parse(row.answers_json)[choice];
@@ -210,34 +216,43 @@ export class QuestionRelay {
       UPDATE cloud_question_delivery SET message_id = ?, delivered_at = ?, delivery_trace_pending = 1
       WHERE id = ? AND message_id IS NULL
     `).run(receipt.messageId, at, id);
-    return this.#deliveryById(id);
+    const row = this.#deliveryById(id);
+    this.#db.prepare('DELETE FROM cloud_question_click WHERE delivery_id = ? AND message_id <> ?').run(id, row.message_id);
+    return row;
+  }
+
+  #pendingChoice(deliveryId, messageId) {
+    return this.#db.prepare('SELECT choice FROM cloud_question_click WHERE delivery_id = ? AND message_id = ?')
+      .get(deliveryId, messageId)?.choice;
   }
 
   async #confirmClickDelivery(row, { messageId, option, binding }) {
     this.#db.prepare(`
-      UPDATE cloud_question_delivery SET pending_lark_message_id = ?, pending_lark_choice = ?
-      WHERE id = ? AND message_id IS NULL AND pending_lark_message_id IS NULL
-    `).run(messageId, option, row.id);
+      INSERT INTO cloud_question_click (delivery_id, message_id, choice)
+      SELECT ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM cloud_question_delivery WHERE id = ? AND message_id IS NULL
+      )
+      ON CONFLICT(delivery_id, message_id) DO NOTHING
+    `).run(row.id, messageId, option, row.id);
     try {
       // The adapter must verify that this bot produced the expected card for
       // this binding. An event's message ID alone is never a delivery receipt.
       const receipt = await this.#lark.readCardReceipt?.({
         actor: binding.actor, card: JSON.parse(row.card_json), messageId, idempotencyKey: row.id,
       });
-      if (receipt?.messageId === messageId) return this.#confirmDelivery(row.id, receipt);
+      if (receipt?.messageId === messageId) this.#confirmDelivery(row.id, receipt);
     } catch {
       // The click remains staged while the delivery receipt is unavailable.
     }
-    return null;
+    return this.#deliveryById(row.id);
   }
 
   async #finishDelivery(row, binding) {
     this.#flushTraces(row);
-    if (row.pending_lark_message_id === row.message_id && !row.raft_receipt_id && !row.closed) {
+    const option = this.#pendingChoice(row.id, row.message_id);
+    if (option !== undefined && !row.raft_receipt_id && !row.closed) {
       try {
-        await this.answer({
-          deliveryId: row.id, messageId: row.message_id, option: row.pending_lark_choice, actor: binding.actor,
-        });
+        await this.answer({ deliveryId: row.id, messageId: row.message_id, option, actor: binding.actor });
       } catch {
         // A staged answer can retry independently of an already confirmed delivery.
       }
