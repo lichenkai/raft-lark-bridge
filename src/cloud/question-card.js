@@ -1,5 +1,7 @@
 const PREVIEW_SCHEMA = 'bridge-preview-1';
 const QUESTION_KINDS = new Set(['single', 'multiple', 'text']);
+const DIRECT_QUESTION_FIELDS = new Set(['id', 'kind', 'text', 'description', 'required', 'allowOther', 'options']);
+const DIRECT_OPTION_FIELDS = new Set(['label', 'value']);
 
 function isText(value) {
   return typeof value === 'string' && value.trim().length > 0;
@@ -39,7 +41,10 @@ function button(label, behavior, type = 'default') {
 function canAnswer(card, settings) {
   if (settings.mode !== 'answer' || !isText(settings.deliveryId) || card.questions.length !== 1) return false;
   const [question] = card.questions;
-  if (question.kind !== 'single' || question.allowOther !== false) return false;
+  if (question.kind !== 'single' || question.allowOther !== false
+    || (question.description !== undefined && typeof question.description !== 'string')) return false;
+  if (!Object.keys(question).every((key) => DIRECT_QUESTION_FIELDS.has(key))
+    || !question.options.every((option) => Object.keys(option).every((key) => DIRECT_OPTION_FIELDS.has(key)))) return false;
   if (question.options.length < 1 || question.options.length > 4) return false;
   return new Set(question.options.map((option) => option.value)).size === question.options.length;
 }
@@ -62,6 +67,7 @@ export function renderQuestionCard(card, settings) {
 
   for (const question of card.questions) {
     elements.push(paragraph(question.text));
+    if (isText(question.description)) elements.push(paragraph(question.description));
     if (question.required) elements.push(paragraph('必答'));
     for (const option of question.options ?? []) {
       if (!answerable) {
@@ -87,4 +93,13 @@ export function renderQuestionCard(card, settings) {
     },
     answers,
   };
+}
+
+export function showAnsweredCard(card, optionIndex) {
+  const isChoice = (element) => element.behaviors?.[0]?.type === 'callback';
+  const selected = card.body.elements.filter(isChoice)[optionIndex]?.text.content;
+  const elements = card.body.elements.filter((element) => !isChoice(element));
+  const status = selected ? `已在 Raft 作答 · ${selected}` : '已在 Raft 作答';
+  elements.splice(-1, 0, paragraph(status));
+  return { ...card, body: { ...card.body, elements } };
 }

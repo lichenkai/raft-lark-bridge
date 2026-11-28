@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { renderQuestionCard } from './question-card.js';
+import { renderQuestionCard, showAnsweredCard } from './question-card.js';
 
 const LARK_DEDUP_WINDOW_MS = 60 * 60 * 1000;
 const LARK_INTERACTION_MS = 14 * 24 * 60 * 60 * 1000;
@@ -24,8 +24,10 @@ function sourceOf(row) {
   return { serverId: row.server_id, cardId: row.card_id, recipientId: row.recipient_id };
 }
 
-function hasReceipt(id, confirmedAt) {
-  return hasText(id) && typeof confirmedAt === 'string' && Number.isFinite(Date.parse(confirmedAt));
+function normalizeReceipt(id, confirmedAt) {
+  if (!hasText(id) || typeof confirmedAt !== 'string') return null;
+  const at = Date.parse(confirmedAt);
+  return Number.isFinite(at) ? new Date(at).toISOString() : null;
 }
 
 export class QuestionRelay {
@@ -62,9 +64,14 @@ export class QuestionRelay {
         first_attempt_at INTEGER,
         message_id TEXT,
         delivered_at TEXT,
+        pending_lark_message_id TEXT,
+        pending_lark_choice INTEGER,
         choice INTEGER,
         raft_receipt_id TEXT,
         answered_at TEXT,
+        delivery_trace_pending INTEGER NOT NULL DEFAULT 0,
+        reply_trace_pending INTEGER NOT NULL DEFAULT 0,
+        outside_answer_json TEXT,
         closed INTEGER NOT NULL DEFAULT 0,
         UNIQUE (server_id, card_id, recipient_id)
       ) STRICT;
@@ -113,7 +120,7 @@ export class QuestionRelay {
         SELECT * FROM cloud_question_delivery WHERE server_id = ? AND card_id = ? AND recipient_id = ?
       `).get(serverId, cardId, recipientId);
       if (row.binding_key !== key) return { state: 'unavailable' };
-      if (row.message_id) return this.#delivered(row);
+      if (row.message_id) return this.#finishDelivery(row, binding);
       // If a transport may have accepted the first attempt, keep the same
       // payload and UUID. Stop automatic retries after Lark's dedup window.
       const previousRendering = renderQuestionCard(card, { ...binding, deliveryId: row.id });
@@ -128,13 +135,8 @@ export class QuestionRelay {
       if (this.#clock() - row.first_attempt_at >= LARK_DEDUP_WINDOW_MS) return { state: 'needs_review', deliveryId: row.id };
       try {
         const receipt = await this.#lark.sendCard({ actor: binding.actor, card: JSON.parse(row.card_json), idempotencyKey: row.id });
-        if (hasReceipt(receipt?.messageId, receipt?.confirmedAt)) {
-          this.#db.prepare(`
-            UPDATE cloud_question_delivery SET message_id = ?, delivered_at = ?
-            WHERE id = ? AND message_id IS NULL
-          `).run(receipt.messageId, receipt.confirmedAt, row.id);
-          return this.#delivered(this.#deliveryById(row.id));
-        }
+        const delivered = this.#confirmDelivery(row.id, receipt);
+        if (delivered) return this.#finishDelivery(delivered, binding);
       } catch {
         // The send may already have succeeded, so the recorded UUID is retained.
       }
@@ -147,7 +149,7 @@ export class QuestionRelay {
       return { state: 'rejected' };
     }
     const row = this.#deliveryById(deliveryId);
-    if (!row || row.message_id !== messageId) return { state: 'rejected' };
+    if (!row || (row.message_id && row.message_id !== messageId)) return { state: 'rejected' };
     const source = sourceOf(row);
     const binding = await this.#bindings(source);
     const clickActor = actorKey(actor);
@@ -155,9 +157,17 @@ export class QuestionRelay {
       || binding.mode !== 'answer' || !JSON.parse(row.answers_json)[option]) return { state: 'rejected' };
 
     return this.#once(`answer:${deliveryId}`, async () => {
-      const latest = this.#deliveryById(deliveryId);
+      let latest = this.#deliveryById(deliveryId);
+      if (!latest.message_id) {
+        if (latest.first_attempt_at === null) return { state: 'rejected' };
+        latest = await this.#confirmClickDelivery(latest, { messageId, option, binding });
+        if (!latest) return { state: 'pending' };
+      }
+      if (latest.message_id !== messageId) return { state: 'rejected' };
       if (latest.raft_receipt_id) return this.#answered(latest);
-      if (latest.closed) return { state: 'closed' };
+      this.#flushTraces(latest);
+      if (latest.closed) return this.#terminalView(latest);
+
       const input = { source, binding, submissionId: latest.id };
       try {
         if (latest.choice !== null) {
@@ -166,14 +176,17 @@ export class QuestionRelay {
         }
 
         const card = await this.#raft.readCard(source, binding);
-        if (card?.recipientId !== source.recipientId || this.#expired(card)
-          || this.#clock() - Date.parse(row.delivered_at) >= LARK_INTERACTION_MS) return { state: 'rejected' };
+        if (card?.recipientId !== source.recipientId) return { state: 'rejected' };
+        if (card.status === 'answered') return this.#acceptResult(latest.id, await this.#raft.readAnswer(input));
+        if (this.#expired(card)
+          || this.#clock() - Date.parse(latest.delivered_at) >= LARK_INTERACTION_MS) return { state: 'rejected' };
         const current = renderQuestionCard(card, { ...binding, deliveryId: row.id });
         if (JSON.stringify(current?.card) !== row.card_json || JSON.stringify(current?.answers) !== row.answers_json) {
           return { state: 'rejected' };
         }
 
-        this.#db.prepare('UPDATE cloud_question_delivery SET choice = COALESCE(choice, ?) WHERE id = ?').run(option, row.id);
+        const stagedOption = latest.pending_lark_message_id === messageId ? latest.pending_lark_choice : option;
+        this.#db.prepare('UPDATE cloud_question_delivery SET choice = COALESCE(choice, ?) WHERE id = ?').run(stagedOption, row.id);
         const choice = this.#deliveryById(row.id).choice;
         const answer = JSON.parse(row.answers_json)[choice];
         return this.#acceptResult(row.id, await this.#raft.submitAnswer({ ...input, answer }));
@@ -190,38 +203,112 @@ export class QuestionRelay {
     return !Number.isFinite(deadline) || this.#clock() >= deadline;
   }
 
-  #delivered(row) {
-    this.#recordTrace(row, 'delivery', row.message_id, row.delivered_at);
+  #confirmDelivery(id, receipt) {
+    const at = normalizeReceipt(receipt?.messageId, receipt?.confirmedAt);
+    if (!at) return null;
+    this.#db.prepare(`
+      UPDATE cloud_question_delivery SET message_id = ?, delivered_at = ?, delivery_trace_pending = 1
+      WHERE id = ? AND message_id IS NULL
+    `).run(receipt.messageId, at, id);
+    return this.#deliveryById(id);
+  }
+
+  async #confirmClickDelivery(row, { messageId, option, binding }) {
+    this.#db.prepare(`
+      UPDATE cloud_question_delivery SET pending_lark_message_id = ?, pending_lark_choice = ?
+      WHERE id = ? AND message_id IS NULL AND pending_lark_message_id IS NULL
+    `).run(messageId, option, row.id);
+    try {
+      // The adapter must verify that this bot produced the expected card for
+      // this binding. An event's message ID alone is never a delivery receipt.
+      const receipt = await this.#lark.readCardReceipt?.({
+        actor: binding.actor, card: JSON.parse(row.card_json), messageId, idempotencyKey: row.id,
+      });
+      if (receipt?.messageId === messageId) return this.#confirmDelivery(row.id, receipt);
+    } catch {
+      // The click remains staged while the delivery receipt is unavailable.
+    }
+    return null;
+  }
+
+  async #finishDelivery(row, binding) {
+    this.#flushTraces(row);
+    if (row.pending_lark_message_id === row.message_id && !row.raft_receipt_id && !row.closed) {
+      try {
+        await this.answer({
+          deliveryId: row.id, messageId: row.message_id, option: row.pending_lark_choice, actor: binding.actor,
+        });
+      } catch {
+        // A staged answer can retry independently of an already confirmed delivery.
+      }
+    }
     return { state: 'delivered', deliveryId: row.id, messageId: row.message_id };
   }
 
   #answered(row) {
-    this.#recordTrace(row, 'reply', row.raft_receipt_id, row.answered_at);
+    this.#flushTraces(row);
     return { state: 'answered', receiptId: row.raft_receipt_id };
   }
 
-  #recordTrace(row, kind, providerReceiptId, confirmedAt) {
-    try {
-      this.#trace?.record({ serverId: row.server_id, deliveryId: row.id, kind, providerReceiptId, confirmedAt,
-        senderName: row.sender_name, recipientName: row.recipient_name });
-    } catch {
-      // Reporting cannot undo a confirmed primary send or answer.
+  retryTraces(serverId) {
+    const rows = this.#db.prepare(`
+      SELECT * FROM cloud_question_delivery WHERE server_id = ?
+        AND (delivery_trace_pending = 1 OR reply_trace_pending = 1)
+      ORDER BY rowid
+      LIMIT 100
+    `).all(serverId);
+    for (const row of rows) this.#flushTraces(row);
+  }
+
+  #flushTraces(row) {
+    const stages = [
+      ['delivery', 'delivery_trace_pending', row.message_id, row.delivered_at],
+      ['reply', 'reply_trace_pending', row.raft_receipt_id, row.answered_at],
+    ];
+    for (const [kind, flag, providerReceiptId, confirmedAt] of stages) {
+      if (!row[flag]) continue;
+      try {
+        this.#trace?.record({ serverId: row.server_id, deliveryId: row.id, kind, providerReceiptId, confirmedAt,
+          senderName: row.sender_name, recipientName: row.recipient_name });
+        this.#db.prepare(`UPDATE cloud_question_delivery SET ${flag} = 0 WHERE id = ?`).run(row.id);
+      } catch {
+        // The primary receipt was saved first. Keep the trace pending for replay.
+      }
     }
   }
 
+  #terminalView(row) {
+    if (!row.outside_answer_json) return { state: 'closed' };
+    const { answer, receiptId } = JSON.parse(row.outside_answer_json);
+    const index = JSON.parse(row.answers_json).findIndex((option) =>
+      option.questionId === answer?.questionId && option.optionValue === answer?.optionValue);
+    return { state: 'answered_elsewhere', answer, receiptId, card: showAnsweredCard(JSON.parse(row.card_json), index) };
+  }
+
   #acceptResult(id, result) {
-    if (result?.state === 'closed' || (result?.state === 'answered' && hasText(result.submissionId) && result.submissionId !== id)) {
+    const at = normalizeReceipt(result?.receiptId, result?.confirmedAt);
+    if (result?.state === 'closed') {
       this.#db.prepare('UPDATE cloud_question_delivery SET closed = 1 WHERE id = ? AND raft_receipt_id IS NULL').run(id);
-      return { state: 'closed' };
+      return this.#terminalView(this.#deliveryById(id));
     }
-    if (result?.state !== 'answered' || result.submissionId !== id || !hasReceipt(result.receiptId, result.confirmedAt)) {
-      return { state: 'pending' };
+    if (result?.state !== 'answered' || !at) return { state: 'pending' };
+    if (result.submissionId !== id) {
+      const answer = result.answer;
+      const canonical = hasText(answer?.questionId) && hasText(answer?.optionValue)
+        ? { questionId: answer.questionId, optionValue: answer.optionValue }
+        : null;
+      this.#db.prepare(`
+        UPDATE cloud_question_delivery SET closed = 1, outside_answer_json = ?
+        WHERE id = ? AND raft_receipt_id IS NULL
+      `).run(JSON.stringify({ answer: canonical, receiptId: result.receiptId }), id);
+      return this.#terminalView(this.#deliveryById(id));
     }
 
     this.#db.prepare(`
-      UPDATE cloud_question_delivery SET raft_receipt_id = ?, answered_at = ?
-      WHERE id = ? AND raft_receipt_id IS NULL
-    `).run(result.receiptId, result.confirmedAt, id);
-    return this.#answered(this.#deliveryById(id));
+      UPDATE cloud_question_delivery SET raft_receipt_id = ?, answered_at = ?, reply_trace_pending = 1
+      WHERE id = ? AND raft_receipt_id IS NULL AND closed = 0
+    `).run(result.receiptId, at, id);
+    const row = this.#deliveryById(id);
+    return row.raft_receipt_id ? this.#answered(row) : this.#terminalView(row);
   }
 }

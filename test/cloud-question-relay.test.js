@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { QuestionRelay } from '../src/cloud/question-relay.js';
 import { TraceJournal } from '../src/cloud/trace-journal.js';
 
@@ -17,7 +20,7 @@ const card = {
 };
 const confirmedAt = '2026-12-01T12:00:00Z';
 
-function fixture({ traceFails = false } = {}) {
+function fixture({ path = ':memory:', traceFails = false, traceFailsOnce = false, offsetReceipt = false } = {}) {
   const trace = new TraceJournal(':memory:', { clock: () => Date.parse(confirmedAt) });
   const revision = trace.configure(source.serverId, 'oc_group');
   trace.verify(source.serverId, revision, { chatId: 'oc_group', messageId: 'om_test' });
@@ -28,10 +31,17 @@ function fixture({ traceFails = false } = {}) {
   let currentBinding = binding;
   let currentCard = card;
   let loseNextResponse = false;
-  const relay = new QuestionRelay({
-    path: ':memory:',
+  let loseNextDelivery = false;
+  let recoverableReceipt = false;
+  let traceFailureCount = 0;
+  const deliveryReceipt = { messageId: 'om_card', confirmedAt: offsetReceipt ? '2026-12-01T20:00:00+08:00' : confirmedAt };
+  const options = {
+    path,
     clock: () => Date.parse(confirmedAt),
-    trace: traceFails ? { record() { throw Error('group reporting unavailable'); } } : trace,
+    trace: { record(event) {
+      if (traceFails || (traceFailsOnce && traceFailureCount++ === 0)) throw Error('group reporting unavailable');
+      return trace.record(event);
+    } },
     bindings: async () => currentBinding,
     raft: {
       readCard: async () => currentCard,
@@ -44,21 +54,31 @@ function fixture({ traceFails = false } = {}) {
       },
     },
     lark: {
+      readCardReceipt: async () => recoverableReceipt ? deliveryReceipt : null,
       sendCard: async (input) => {
         sent.push(input);
-        return { messageId: 'om_card', confirmedAt };
+        if (loseNextDelivery) {
+          loseNextDelivery = false;
+          throw Error('lost Lark reply');
+        }
+        return deliveryReceipt;
       },
     },
-  });
+  };
+  let relay = new QuestionRelay(options);
 
   return {
-    relay, trace, sent, submissions,
+    get relay() { return relay; },
+    restart() { relay.close(); relay = new QuestionRelay(options); },
+    trace, sent, submissions,
     loseResponse() { loseNextResponse = true; },
+    loseDelivery() { loseNextDelivery = true; },
+    allowReceiptRead() { recoverableReceipt = true; },
     rebind() { currentBinding = { ...binding, revision: '2' }; },
     changeCard() { currentCard = { ...card, title: '改了问题' }; },
     answerElsewhere() {
       currentCard = { ...card, status: 'answered' };
-      result = { state: 'answered', submissionId: 'raft-web-answer', receiptId: 'raft_web_receipt', confirmedAt };
+      result = { state: 'answered', receiptId: 'raft_web_receipt', confirmedAt, answer: { questionId: 'confirm', optionValue: 'wait' } };
     },
     close() { relay.close(); trace.close(); },
   };
@@ -135,7 +155,73 @@ test('an answer saved in Raft before the click is never overwritten or traced as
   system.answerElsewhere();
 
   const result = await system.relay.answer({ deliveryId: delivered.deliveryId, messageId: delivered.messageId, option: 0, actor });
-  assert.equal(result.state, 'rejected');
+  assert.equal(result.state, 'answered_elsewhere');
+  assert.deepEqual(result.answer, { questionId: 'confirm', optionValue: 'wait' });
+  assert.ok(result.card.body.elements.some((element) => element.text?.content === '已在 Raft 作答 · 稍后'));
+  assert.ok(result.card.body.elements.every((element) => element.behaviors?.[0]?.type !== 'callback'));
   assert.equal(system.submissions.length, 0);
   assert.equal(system.trace.pending(source.serverId).length, 1);
+});
+
+test('the first verified click survives restart and resumes after a lost Lark receipt recovers', async (t) => {
+  const temporary = mkdtempSync(join(tmpdir(), 'bridge-click-restart-'));
+  const system = fixture({ path: join(temporary, 'relay.db') });
+  t.after(() => {
+    system.close();
+    rmSync(temporary, { recursive: true, force: true });
+  });
+  system.loseDelivery();
+  const delivery = await system.relay.deliver(source);
+  assert.equal(delivery.state, 'pending');
+
+  const click = { deliveryId: delivery.deliveryId, messageId: 'om_card', option: 0, actor };
+  assert.equal((await system.relay.answer(click)).state, 'pending');
+  assert.equal(system.submissions.length, 0);
+  system.restart();
+  assert.equal((await system.relay.deliver(source)).state, 'delivered');
+  assert.equal(system.submissions.length, 1);
+  assert.equal(system.sent[0].idempotencyKey, system.sent[1].idempotencyKey);
+  assert.equal((await system.relay.answer({ ...click, option: 1 })).state, 'answered');
+  assert.equal(system.submissions.length, 1);
+  assert.deepEqual(system.submissions[0].answer, { questionId: 'confirm', optionValue: 'yes' });
+});
+
+test('a verified original message read reconciles the delivery before writing the answer', async (t) => {
+  const system = fixture();
+  t.after(() => system.close());
+  system.loseDelivery();
+  const delivery = await system.relay.deliver(source);
+  system.allowReceiptRead();
+  const click = { deliveryId: delivery.deliveryId, messageId: 'om_card', option: 0, actor };
+  assert.equal((await system.relay.answer(click)).state, 'answered');
+  assert.equal(system.sent.length, 1);
+  assert.equal(system.submissions.length, 1);
+});
+
+test('a trace write failure retains the receipt for replay and normalizes offset timestamps', async (t) => {
+  const system = fixture({ traceFailsOnce: true, offsetReceipt: true });
+  t.after(() => system.close());
+  const delivery = await system.relay.deliver(source);
+  assert.equal(delivery.state, 'delivered');
+  assert.equal(system.trace.pending(source.serverId).length, 0);
+
+  const state = await system.relay.answer({ deliveryId: delivery.deliveryId, messageId: 'om_card', option: 0, actor });
+  assert.equal(state.state, 'answered');
+  const [first, second] = system.trace.pending(source.serverId);
+  assert.match(first.text, /2026-12-01T12:00:00\.000Z/);
+  assert.equal(first.traceId, second.traceId);
+  assert.equal(system.sent.length, 1);
+});
+
+test('a staged click never submits against a different confirmed Lark message', async (t) => {
+  const system = fixture();
+  t.after(() => system.close());
+  system.loseDelivery();
+  const delivery = await system.relay.deliver(source);
+  const click = { deliveryId: delivery.deliveryId, messageId: 'om_unrelated', option: 0, actor };
+  assert.equal((await system.relay.answer(click)).state, 'pending');
+  assert.equal((await system.relay.deliver(source)).state, 'delivered');
+  assert.equal(system.submissions.length, 0);
+  assert.equal((await system.relay.answer({ ...click, messageId: 'om_card', option: 1 })).state, 'answered');
+  assert.deepEqual(system.submissions[0].answer, { questionId: 'confirm', optionValue: 'wait' });
 });

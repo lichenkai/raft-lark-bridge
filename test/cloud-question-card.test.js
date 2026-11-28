@@ -98,3 +98,16 @@ test('malformed text question options and non-string source links are rejected',
   assert.equal(renderQuestionCard(source, settings), null);
   assert.equal(renderQuestionCard({ ...previewCard(), originalUrl: ['https://raft.example.com/messages/example'] }, settings), null);
 });
+
+test('question-level instructions stay visible, and unsupported conditions require the original card', () => {
+  const source = previewCard();
+  source.questions[0].description = '仅同意测试环境，生产发布另行审批。';
+  const simple = renderQuestionCard(source, settings);
+  assert.equal(simple.mode, 'answer');
+  assert.ok(simple.card.body.elements.some((element) => element.text?.content === source.questions[0].description));
+
+  source.questions[0].validation = { requiresReason: true };
+  const conditional = renderQuestionCard(source, settings);
+  assert.equal(conditional.mode, 'link');
+  assert.equal(callbacks(conditional).length, 0);
+});
