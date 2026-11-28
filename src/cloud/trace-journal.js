@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { LARK_SEND_DEDUP_MS } from './lark-bot.js';
 
 function isText(value) {
   return typeof value === 'string' && value.trim().length > 0;
@@ -20,6 +21,7 @@ function isConfirmed(event) {
 export class TraceJournal {
   #db;
   #clock;
+  #sending = new Map();
 
   constructor(path, { clock = Date.now } = {}) {
     this.#clock = clock;
@@ -45,6 +47,7 @@ export class TraceJournal {
         recipient_name TEXT NOT NULL,
         confirmed_at TEXT NOT NULL,
         sent_message_id TEXT,
+        first_attempt_at INTEGER,
         UNIQUE (server_id, delivery_id, kind)
       ) STRICT;
       CREATE INDEX IF NOT EXISTS cloud_trace_pending
@@ -124,6 +127,48 @@ export class TraceJournal {
         : `回复　${recipientName} → ${senderName}`;
       return { id, traceId, chatId, text: `${direction}　${confirmedAt}　编号 ${traceId}` };
     });
+  }
+
+  flush(serverId, send) {
+    const current = this.#sending.get(serverId);
+    if (current) return current;
+    const running = Promise.resolve().then(() => this.#sendPending(serverId, send))
+      .finally(() => this.#sending.delete(serverId));
+    this.#sending.set(serverId, running);
+    return running;
+  }
+
+  async #sendPending(serverId, send) {
+    const result = { sent: 0, pending: 0, needsReview: 0 };
+    const begin = this.#db.prepare(`
+      UPDATE cloud_trace_notices SET first_attempt_at = COALESCE(first_attempt_at, ?)
+      WHERE server_id = ? AND id = ? AND sent_message_id IS NULL AND EXISTS (
+        SELECT 1 FROM cloud_trace_settings s WHERE s.server_id = cloud_trace_notices.server_id
+          AND s.revision = cloud_trace_notices.revision AND s.enabled_since IS NOT NULL
+      )
+      RETURNING first_attempt_at
+    `);
+
+    for (const notice of this.pending(serverId)) {
+      const now = this.#clock();
+      const attempt = begin.get(now, serverId, notice.id);
+      if (!attempt) continue;
+      if (now - attempt.first_attempt_at >= LARK_SEND_DEDUP_MS) {
+        result.needsReview += 1;
+        continue;
+      }
+      try {
+        const receipt = await send(notice);
+        if (receipt?.chatId === notice.chatId && this.markSent(serverId, notice.id, receipt.messageId)) {
+          result.sent += 1;
+          continue;
+        }
+      } catch {
+        // Retain the notice UUID and attempt time for the next dispatch.
+      }
+      result.pending += 1;
+    }
+    return result;
   }
 
   markSent(serverId, id, messageId) {

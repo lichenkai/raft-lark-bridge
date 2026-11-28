@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { renderQuestionCard, showAnsweredCard } from './question-card.js';
 
-const LARK_DEDUP_WINDOW_MS = 60 * 60 * 1000;
+import { LARK_SEND_DEDUP_MS } from './lark-bot.js';
 const LARK_INTERACTION_MS = 14 * 24 * 60 * 60 * 1000;
 
 function hasText(value) {
@@ -132,7 +132,7 @@ export class QuestionRelay {
         UPDATE cloud_question_delivery SET first_attempt_at = COALESCE(first_attempt_at, ?) WHERE id = ?
       `).run(this.#clock(), row.id);
       row = this.#deliveryById(row.id);
-      if (this.#clock() - row.first_attempt_at >= LARK_DEDUP_WINDOW_MS) return { state: 'needs_review', deliveryId: row.id };
+      if (this.#clock() - row.first_attempt_at >= LARK_SEND_DEDUP_MS) return { state: 'needs_review', deliveryId: row.id };
       try {
         const receipt = await this.#lark.sendCard({ actor: binding.actor, card: JSON.parse(row.card_json), idempotencyKey: row.id });
         const delivered = this.#confirmDelivery(row.id, receipt);
