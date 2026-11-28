@@ -78,3 +78,35 @@ test('malformed target and oversized cards are rejected before looking up a toke
   await assert.rejects(bot.sendCard({ actor, card: { schema: '2.0', description: '字'.repeat(15000) }, idempotencyKey }),
     (error) => error.reason === 'message_too_large');
 });
+
+test('receipt recovery accepts only a matching card sent by the same Lark app and tenant', async () => {
+  const card = { schema: '2.0', body: { elements: [] } };
+  const message = { ...data, msg_type: 'interactive', deleted: false,
+    sender: { sender_type: 'app', id_type: 'app_id', id: actor.appId, tenant_key: actor.tenantId },
+    body: { content: JSON.stringify(card) } };
+  let returned = message;
+  const bot = makeLarkBot({
+    region: 'lark',
+    getTenantToken: async () => 'example-token',
+    fetcher: async (url, init) => {
+      assert.equal(String(url), 'https://open.larksuite.com/open-apis/im/v1/messages/om_example');
+      assert.equal(init.method, 'GET');
+      return Response.json({ code: 0, data: { items: [returned] } });
+    },
+  });
+  const lookup = { actor, card, messageId: 'om_example', idempotencyKey };
+  assert.deepEqual(await bot.readCardReceipt(lookup), {
+    messageId: 'om_example', chatId: 'oc_trace', confirmedAt: createdAt,
+  });
+
+  for (const changes of [
+    { deleted: true },
+    { sender: { ...message.sender, tenant_key: 'foreign_tenant' } },
+    { sender: { ...message.sender, id: 'cli_other' } },
+    { body: { content: '{"other":true}' } },
+    { message_id: 'om_other' },
+  ]) {
+    returned = { ...message, ...changes };
+    assert.equal(await bot.readCardReceipt(lookup), null);
+  }
+});

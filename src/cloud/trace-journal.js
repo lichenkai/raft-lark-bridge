@@ -48,6 +48,7 @@ export class TraceJournal {
         confirmed_at TEXT NOT NULL,
         sent_message_id TEXT,
         first_attempt_at INTEGER,
+        review_required INTEGER NOT NULL DEFAULT 0,
         UNIQUE (server_id, delivery_id, kind)
       ) STRICT;
       CREATE INDEX IF NOT EXISTS cloud_trace_pending
@@ -118,7 +119,7 @@ export class TraceJournal {
         n.sender_name AS senderName, n.recipient_name AS recipientName, n.confirmed_at AS confirmedAt
       FROM cloud_trace_notices n JOIN cloud_trace_settings s
         ON s.server_id = n.server_id AND s.revision = n.revision
-      WHERE n.server_id = ? AND s.enabled_since IS NOT NULL AND n.sent_message_id IS NULL
+      WHERE n.server_id = ? AND s.enabled_since IS NOT NULL AND n.sent_message_id IS NULL AND n.review_required = 0
       ORDER BY n.confirmed_at, n.rowid
       LIMIT 100
     `).all(serverId);
@@ -139,10 +140,17 @@ export class TraceJournal {
   }
 
   async #sendPending(serverId, send) {
-    const result = { sent: 0, pending: 0, needsReview: 0 };
+    const review = this.#db.prepare(`
+      UPDATE cloud_trace_notices SET review_required = 1
+      WHERE server_id = ? AND sent_message_id IS NULL AND review_required = 0 AND first_attempt_at <= ?
+        AND EXISTS (SELECT 1 FROM cloud_trace_settings s
+          WHERE s.server_id = cloud_trace_notices.server_id AND s.revision = cloud_trace_notices.revision
+            AND s.enabled_since IS NOT NULL)
+    `);
+    const result = { sent: 0, pending: 0, needsReview: review.run(serverId, this.#clock() - LARK_SEND_DEDUP_MS).changes };
     const begin = this.#db.prepare(`
       UPDATE cloud_trace_notices SET first_attempt_at = COALESCE(first_attempt_at, ?)
-      WHERE server_id = ? AND id = ? AND sent_message_id IS NULL AND EXISTS (
+      WHERE server_id = ? AND id = ? AND sent_message_id IS NULL AND review_required = 0 AND EXISTS (
         SELECT 1 FROM cloud_trace_settings s WHERE s.server_id = cloud_trace_notices.server_id
           AND s.revision = cloud_trace_notices.revision AND s.enabled_since IS NOT NULL
       )
@@ -154,7 +162,7 @@ export class TraceJournal {
       const attempt = begin.get(now, serverId, notice.id);
       if (!attempt) continue;
       if (now - attempt.first_attempt_at >= LARK_SEND_DEDUP_MS) {
-        result.needsReview += 1;
+        result.needsReview += review.run(serverId, now - LARK_SEND_DEDUP_MS).changes;
         continue;
       }
       try {

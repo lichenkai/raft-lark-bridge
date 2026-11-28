@@ -59,3 +59,22 @@ test('ambiguous sends beyond the Lark dedup time require review before sending a
     sent: 0, pending: 0, needsReview: 2,
   });
 });
+
+test('a batch of expired traces does not block dispatch of new ones', async (t) => {
+  const { journal, advance } = journalFixture(t);
+  for (let index = 0; index < 98; index += 1) {
+    journal.record({
+      serverId, deliveryId: `old-${index}`, kind: 'delivery', providerReceiptId: 'older',
+      confirmedAt: '2026-12-01T12:00:00Z', senderName: '发起人', recipientName: '用户',
+    });
+  }
+  const failed = await journal.flush(serverId, async () => { throw Error('unknown receipt'); });
+  assert.equal(failed.pending, 100);
+  advance(60 * 60 * 1000);
+  journal.record({
+    serverId, deliveryId: 'new', kind: 'delivery', providerReceiptId: 'newer',
+    confirmedAt: '2026-12-01T13:00:00Z', senderName: '发起人', recipientName: '用户',
+  });
+  const result = await journal.flush(serverId, async () => ({ chatId, messageId: 'om_later' }));
+  assert.deepEqual(result, { sent: 1, pending: 0, needsReview: 100 });
+});
