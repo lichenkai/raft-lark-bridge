@@ -5,7 +5,7 @@
   "description": "Local Lark CLI user-identity bridge for Raft agents",
   "type": "module",
   "bin": { "raft-lark-bridge": "./src/cli.js" },
-  "files": ["src", "README.md", "docs/assets/*.svg", "skills/raft-lark-bridge/SKILL.md"],
+  "files": ["src", "README.md", "AGENTS.md", "CONTRIBUTING.md", "docs/*.md", "docs/assets/*.svg", "specs/*/*.md", "skills/raft-lark-bridge/SKILL.md"],
   "engines": { "node": ">=22.13.0" },
   "scripts": {
     "preflight": "node src/preflight.js",

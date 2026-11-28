@@ -19,6 +19,12 @@
 - **让 Raft Agent 处理，以你的飞书身份回复。** 正式答复会引用原消息，发回原会话。
 - **为不同 Agent 分别配置规则。** 一个本地桥接服务可管理多条绑定，支持预览、暂停和恢复。
 
+## 文档入口
+
+- 已可用的本地文字桥接从下方「快速开始」配置。
+- 计划中的云端问题卡、Raft 私信和个人 @，见 [架构与场景](docs/architecture.md)、[云端设置](docs/cloud-setup.md) 和 [配置预演](docs/cloud-setup-rehearsal.md)。
+- 从 [文档索引](docs/README.md) 找 spec、协议和验收。从 [贡献指南](CONTRIBUTING.md) 开 feature 和配置 CodeGraph。Codex 及其它 Agent 可从 [项目 Skill](skills/raft-lark-bridge/SKILL.md) 开始。
+
 ## 快速开始
 
 ### 1. 安装项目并检查飞书账号
@@ -122,7 +128,7 @@ tail -F ~/.raft-lark-bridge/bridge.log
 - **macOS** 使用用户级 LaunchAgent。
 - **Ubuntu、CentOS Stream 等 systemd Linux** 使用 `systemctl --user`。通过 SSH 登录运行账号后完成授权和配置。要在系统启动后自动运行，并在退出 SSH 后继续运行，请让管理员执行 `sudo loginctl enable-linger <运行账号>`。[systemd 用户服务与 linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20USER%E2%80%A6)
 
-`npm stop` 停止后台服务。`npm run bridge service remove` 移除服务，保留绑定和 SQLite 状态。自定义 `--data-dir` 时，管理命令需传同一个目录，`bridge.log` 也在该目录内。绑定修改在下一轮生效。移动安装位置或更换 Node.js 路径后，再运行 `npm start`。
+`npm stop` 停止后台服务。`npm run bridge service remove` 移除服务，保留绑定和 SQLite 状态。自定义 `--data-dir` 时，管理命令需传同一个目录，`bridge.log` 也在该目录内。绑定修改在下一轮生效。移动安装位置或更换 Node.js 路径后，再运行 `npm start`。同路径升级代码时，先在同一个数据目录运行 `npm stop`，再运行 `npm start`，随后核状态和一条新的测试回信。
 
 `npm start debug` 切到当前终端持续运行，同时把调试日志写到 `bridge.log`。同一配置的后台服务正在运行时，会先停止它。用 Ctrl+C 结束前台调试，再运行 `npm start` 恢复后台运行。需要后台持续记录调试日志时，使用 `node src/cli.js service install --debug`。
 
@@ -173,6 +179,12 @@ npm pack --dry-run
 - **Choose which Lark messages to forward.** Select a direct chat, a group chat, or messages that @mention you in a specific group.
 - **Have a Raft agent respond as you.** Its final answer goes back to the original Lark message using your signed-in account.
 - **Manage multiple bindings locally.** Preview, pause, and resume each agent's routing rules independently.
+
+### Documentation
+
+- The quick start below configures the current personal text bridge.
+- The planned cloud question-card, DM and mention workflows have a [design and documentation index](docs/README.md), [setup guide](docs/cloud-setup.md) and [setup rehearsal](docs/cloud-setup-rehearsal.md).
+- Developers can start with the [contribution guide](CONTRIBUTING.md). Codex and other agents can follow the same [project skill](skills/raft-lark-bridge/SKILL.md).
 
 ### Quick start
 
@@ -275,7 +287,7 @@ tail -F ~/.raft-lark-bridge/bridge.log
 - **macOS** uses a user-level LaunchAgent.
 - **Ubuntu, CentOS Stream, and other Linux distributions with systemd** use `systemctl --user`. Sign in over SSH as the service account to authorize Lark CLI and configure the bridge. To run at boot and stay active after SSH logout, have an administrator run `sudo loginctl enable-linger <service-account>`. [systemd user lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20USER%E2%80%A6)
 
-Use `npm stop` to stop the background service and `npm run bridge service remove` to remove it while preserving bindings and SQLite state. If you use a custom `--data-dir`, pass it to every service command and look for `bridge.log` in that directory. Binding changes take effect on the next cycle. Run `npm start` again if you move the checkout or change the Node.js path.
+Use `npm stop` to stop the background service and `npm run bridge service remove` to remove it while preserving bindings and SQLite state. If you use a custom `--data-dir`, pass it to every service command and look for `bridge.log` in that directory. Binding changes take effect on the next cycle. Run `npm start` again if you move the checkout or change the Node.js path. After a same-path code upgrade, run `npm stop` and then `npm start` with the same data directory. Verify a fresh test reply.
 
 Use `npm start debug` to keep the bridge running in the current terminal and write the same debug events to `bridge.log`. It first stops a running background service for the same configuration. Press Ctrl+C to end the foreground run, then run `npm start` to return to background operation. For debug logging in the background, use `node src/cli.js service install --debug`.
 

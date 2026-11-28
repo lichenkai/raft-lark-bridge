@@ -6,3 +6,5 @@ config.json
 raft-credential.json
 *.log
 .DS_Store
+
+/.codegraph/
