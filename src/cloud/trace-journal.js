@@ -55,6 +55,25 @@ export class TraceJournal {
         ON cloud_trace_notices(server_id, revision, confirmed_at)
         WHERE sent_message_id IS NULL;
     `);
+    this.#upgradeDispatchColumns();
+  }
+
+  #upgradeDispatchColumns() {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const columns = new Set(this.#db.prepare('PRAGMA table_info(cloud_trace_notices)').all().map(({ name }) => name));
+      if (!columns.has('first_attempt_at')) {
+        this.#db.exec('ALTER TABLE cloud_trace_notices ADD COLUMN first_attempt_at INTEGER');
+      }
+      if (!columns.has('review_required')) {
+        this.#db.exec('ALTER TABLE cloud_trace_notices ADD COLUMN review_required INTEGER NOT NULL DEFAULT 0');
+      }
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      this.#db.close();
+      throw error;
+    }
   }
 
   close() {
@@ -158,15 +177,17 @@ export class TraceJournal {
     `);
 
     for (const notice of this.pending(serverId)) {
-      const now = this.#clock();
-      const attempt = begin.get(now, serverId, notice.id);
-      if (!attempt) continue;
-      if (now - attempt.first_attempt_at >= LARK_SEND_DEDUP_MS) {
+      let permitted;
+      const beforeSend = () => {
+        const now = this.#clock();
         result.needsReview += review.run(serverId, now - LARK_SEND_DEDUP_MS).changes;
-        continue;
-      }
+        permitted = Boolean(begin.get(now, serverId, notice.id));
+        return permitted;
+      };
+      if (!beforeSend()) continue;
       try {
-        const receipt = await send(notice);
+        // The Lark adapter rechecks after asynchronous token acquisition.
+        const receipt = await send(notice, beforeSend);
         if (receipt?.chatId === notice.chatId && this.markSent(serverId, notice.id, receipt.messageId)) {
           result.sent += 1;
           continue;
@@ -174,7 +195,7 @@ export class TraceJournal {
       } catch {
         // Retain the notice UUID and attempt time for the next dispatch.
       }
-      result.pending += 1;
+      if (permitted) result.pending += 1;
     }
     return result;
   }

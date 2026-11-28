@@ -94,7 +94,7 @@ test('receipt recovery accepts only a matching card sent by the same Lark app an
       return Response.json({ code: 0, data: { items: [returned] } });
     },
   });
-  const lookup = { actor, card, messageId: 'om_example', idempotencyKey };
+  const lookup = { actor, card, messageId: 'om_example', chatId: 'oc_trace', idempotencyKey };
   assert.deepEqual(await bot.readCardReceipt(lookup), {
     messageId: 'om_example', chatId: 'oc_trace', confirmedAt: createdAt,
   });
@@ -102,12 +102,15 @@ test('receipt recovery accepts only a matching card sent by the same Lark app an
   returned = { ...message, msg_type: 'card' };
   assert.equal((await bot.readCardReceipt(lookup)).messageId, 'om_example');
 
+  assert.equal(await bot.readCardReceipt({ ...lookup, chatId: undefined }), null);
+
   for (const changes of [
     { deleted: true },
     { sender: { ...message.sender, tenant_key: 'foreign_tenant' } },
     { sender: { ...message.sender, id: 'cli_other' } },
     { body: { content: '{"other":true}' } },
     { message_id: 'om_other' },
+    { chat_id: 'oc_other' },
   ]) {
     returned = { ...message, ...changes };
     assert.equal(await bot.readCardReceipt(lookup), null);

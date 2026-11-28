@@ -9,7 +9,7 @@ import { TraceJournal } from '../src/cloud/trace-journal.js';
 const source = { serverId: 'server-one', cardId: 'card-one', recipientId: 'recipient-one' };
 const actor = { tenantId: 'tenant', appId: 'app', openId: 'ou_test' };
 const binding = {
-  id: 'binding', revision: '1', actor, raftOrigin: 'https://raft.example.com', mode: 'answer', recipientName: '试点员工',
+  id: 'binding', revision: '1', actor, raftOrigin: 'https://raft.example.com', mode: 'answer', larkChatId: 'oc_personal', recipientName: '试点员工',
 };
 const card = {
   type: 'question:ask', version: 'bridge-preview-1', status: 'open', recipientId: source.recipientId,
@@ -35,7 +35,7 @@ function fixture({ path = ':memory:', traceFails = false, traceFailsOnce = false
   let recoverableReceipt = false;
   let readOverride;
   let traceFailureCount = 0;
-  const deliveryReceipt = { messageId: 'om_card', confirmedAt: offsetReceipt ? '2026-12-01T20:00:00+08:00' : confirmedAt };
+  const deliveryReceipt = { messageId: 'om_card', chatId: 'oc_personal', confirmedAt: offsetReceipt ? '2026-12-01T20:00:00+08:00' : confirmedAt };
   const options = {
     path,
     clock: () => Date.parse(confirmedAt),
@@ -262,4 +262,15 @@ test('a concurrent delivery confirmation resumes a staged click before a read ca
   assert.equal(deliveryAfterRetry.state, 'delivered');
   assert.equal(answer.state, 'answered');
   assert.equal(system.submissions.length, 1);
+});
+
+test('a receipt returned in an unrelated private chat cannot unlock the staged click', async (t) => {
+  const system = fixture();
+  t.after(() => system.close());
+  system.loseDelivery();
+  const delivery = await system.relay.deliver(source);
+  system.overrideReceiptReader(async () => ({ messageId: 'om_card', chatId: 'oc_unrelated', confirmedAt }));
+  const click = { deliveryId: delivery.deliveryId, messageId: 'om_card', option: 0, actor };
+  assert.equal((await system.relay.answer(click)).state, 'pending');
+  assert.equal(system.submissions.length, 0);
 });

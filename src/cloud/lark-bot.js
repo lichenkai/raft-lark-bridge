@@ -26,12 +26,12 @@ function matchingId(value, prefix) {
   return validString(value) && value.startsWith(prefix) && /^[a-zA-Z0-9_-]+$/u.test(value);
 }
 
-function receipt(data, targetGroup) {
+function receipt(data, expectedChatId) {
   const timestamp = typeof data?.create_time === 'string' && /^\d+$/u.test(data.create_time)
     ? new Date(Number(data.create_time))
     : null;
   if (!matchingId(data?.message_id, 'om_') || !matchingId(data?.chat_id, 'oc_')
-    || (targetGroup && data.chat_id !== targetGroup) || !timestamp || !Number.isFinite(timestamp.getTime())) {
+    || (expectedChatId && data.chat_id !== expectedChatId) || !timestamp || !Number.isFinite(timestamp.getTime())) {
     throw new LarkSendError('invalid_receipt');
   }
   return { messageId: data.message_id, chatId: data.chat_id, confirmedAt: timestamp.toISOString() };
@@ -43,7 +43,7 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
   if (!Object.hasOwn(API_ORIGINS, region)) throw new TypeError('Choose Lark or Feishu');
   const endpoint = new URL('/open-apis/im/v1/messages', API_ORIGINS[region]);
 
-  async function request(actor, url, operation, init) {
+  async function request(actor, url, operation, init, beforeSend) {
     const { tenantId, appId } = actor ?? {};
     if (![tenantId, appId].every(validString)) throw new LarkSendError('invalid_request');
     let token;
@@ -56,6 +56,7 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
 
     let response;
     let result;
+    if (beforeSend && !beforeSend()) throw new LarkSendError('send_cancelled');
     try {
       response = await fetcher(url, {
         ...init,
@@ -76,7 +77,7 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
     return result.data;
   }
 
-  async function send(actor, target, targetType, messageType, content, idempotencyKey) {
+  async function send(actor, target, targetType, messageType, content, idempotencyKey, beforeSend) {
     const group = targetType === 'chat_id';
     if (!matchingId(target, group ? 'oc_' : 'ou_') || !validString(idempotencyKey) || idempotencyKey.length > 50) {
       throw new LarkSendError('invalid_request');
@@ -88,7 +89,7 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
 
     const url = new URL(endpoint);
     url.searchParams.set('receive_id_type', targetType);
-    const data = await request(actor, url, 'send', { method: 'POST', body });
+    const data = await request(actor, url, 'send', { method: 'POST', body }, beforeSend);
     return receipt(data, group ? target : null);
   }
 
@@ -100,8 +101,9 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
 
     // Only call for authenticated card-click events associated with a known
     // local delivery. Unreadable or reserialized platform content stays pending.
-    async readCardReceipt({ actor, card, messageId }) {
+    async readCardReceipt({ actor, card, messageId, chatId }) {
       if (!matchingId(messageId, 'om_') || card?.schema !== '2.0') throw new LarkSendError('invalid_request');
+      if (!matchingId(chatId, 'oc_')) return null;
       const url = new URL(`${endpoint.pathname}/${messageId}`, endpoint);
       const data = await request(actor, url, 'read', { method: 'GET' });
       const message = data?.items?.[0];
@@ -112,7 +114,7 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
         || sender.id !== actor.appId || sender.tenant_key !== actor.tenantId) return null;
       try {
         if (!isDeepStrictEqual(JSON.parse(message.body?.content), card)) return null;
-        return receipt(message, null);
+        return receipt(message, chatId);
       } catch {
         return null;
       }
@@ -127,9 +129,9 @@ export function makeLarkBot({ region, getTenantToken, fetcher = fetch }) {
       return { messageId };
     },
 
-    async sendTrace({ actor, chatId, text, idempotencyKey }) {
+    async sendTrace({ actor, chatId, text, idempotencyKey, beforeSend }) {
       if (!validString(text)) throw new LarkSendError('invalid_request');
-      return send(actor, chatId, 'chat_id', 'text', { text }, idempotencyKey);
+      return send(actor, chatId, 'chat_id', 'text', { text }, idempotencyKey, beforeSend);
     },
   };
 }

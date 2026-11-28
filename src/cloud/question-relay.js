@@ -237,10 +237,13 @@ export class QuestionRelay {
     try {
       // The adapter must verify that this bot produced the expected card for
       // this binding. An event's message ID alone is never a delivery receipt.
-      const receipt = await this.#lark.readCardReceipt?.({
-        actor: binding.actor, card: JSON.parse(row.card_json), messageId, idempotencyKey: row.id,
-      });
-      if (receipt?.messageId === messageId) this.#confirmDelivery(row.id, receipt);
+      const chatId = binding.larkChatId;
+      if (hasText(chatId)) {
+        const receipt = await this.#lark.readCardReceipt?.({
+          actor: binding.actor, card: JSON.parse(row.card_json), messageId, chatId, idempotencyKey: row.id,
+        });
+        if (receipt?.messageId === messageId && receipt.chatId === chatId) this.#confirmDelivery(row.id, receipt);
+      }
     } catch {
       // The click remains staged while the delivery receipt is unavailable.
     }
