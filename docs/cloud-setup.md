@@ -45,6 +45,10 @@ raft integration app prepare register \
 
 [飞书应用发消息](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create) · [飞书回调](https://open.feishu.cn/document/event-subscription-guide/callback-subscription/receive-and-handle-callbacks) · [飞书用户标识](https://open.larksuite.com/document/home/user-identity-introduction)
 
+## 配置链路追踪群
+
+需要追踪投递和回写时，在对应 Raft 服务器设置中配置一个飞书群 `chat_id`。把同一个应用机器人加进群，由管理员确认群成员可见传递双方和时间。验证一条测试通知后开启。按 SOP 核同编号的投递与回复、关闭后的状态。 [链路追踪配置和验收](../specs/trace-notifications/spec.md)
+
 ## Agent 引导与交接
 
 把仓库交给 Codex 或其他开发 Agent，要求按 [项目 Skill](../skills/raft-lark-bridge/SKILL.md) 在目标机器检查并引导配置。维护者提供要部署的模式、运行账号、目标服务器和测试对象。引导过程先检查现有服务、权限和缺项，给出下一条能执行的操作。需要管理员确认或用户登录时，明确动作在哪里完成，完成后继续检查原项。涉及个人账号授权、密钥和生产访问时使用平台受控入口。

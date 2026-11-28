@@ -9,5 +9,6 @@
 | 开发 feature、启用 CodeGraph 或提交评审 | [贡献指南](../CONTRIBUTING.md) |
 | 评审云端问题卡的需求、协议或验证结果 | [功能 spec](../specs/cloud-question-cards/spec.md) · [卡片盘点](../specs/cloud-question-cards/card-types.md) · [协议](../specs/cloud-question-cards/protocol.md) · [验收](../specs/cloud-question-cards/verification.md) |
 | 了解普通私信、个人 @ 与原会话回复 | [个人消息 spec](../specs/personal-messages/spec.md) |
+| 配置机器人群里的投递与回复追踪 | [链路追踪 spec](../specs/trace-notifications/spec.md) |
 
 本地文字桥接已实现。云端原生问题卡按 spec 开发，实际启用取决于 Raft 对原卡投递及本人作答的授权接口。
