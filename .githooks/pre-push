@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+project_root=$(git rev-parse --show-toplevel)
+
+if ! command -v codegraph >/dev/null 2>&1; then
+    printf '%s\n' 'CodeGraph is required before pushing. Install it and check PATH (see CONTRIBUTING.md).' >&2
+    exit 1
+fi
+
+if [ ! -d "$project_root/.codegraph" ]; then
+    printf '%s\n' 'CodeGraph is not initialized for this checkout. Run codegraph init --yes . from the project root.' >&2
+    exit 1
+fi
+
+if ! codegraph sync --quiet "$project_root"; then
+    printf '%s\n' 'CodeGraph sync failed. Check codegraph status, fix the index, and retry the push.' >&2
+    exit 1
+fi
