@@ -111,3 +111,10 @@ test('question-level instructions stay visible, and unsupported conditions requi
   assert.equal(conditional.mode, 'link');
   assert.equal(callbacks(conditional).length, 0);
 });
+
+test('unknown card-wide action conditions cannot enable a direct action', () => {
+  const source = { ...previewCard(), completionRule: { needsFollowUp: true } };
+  const result = renderQuestionCard(source, settings);
+  assert.equal(result.mode, 'link');
+  assert.equal(callbacks(result).length, 0);
+});
